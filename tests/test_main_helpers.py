@@ -42,10 +42,10 @@ def test_build_metadata_basic() -> None:
     )
     assert meta["start_time"] == "2024-01-01T00:00:00+00:00"
     assert meta["end_time"] == "2024-01-01T01:00:00+00:00"
-    assert meta["project_directory"] == "/proj"
-    assert meta["source_directory"] == "/proj/src"
+    assert meta["project_directory"] == str(Path("/proj"))
+    assert meta["source_directory"] == str(Path("/proj/src"))
     assert meta["file_argument"] is None
-    assert meta["output_file"] == "/proj/output.json"
+    assert meta["output_file"] == str(Path("/proj/output.json"))
     assert meta["test_command"] == "pytest tests/"
     assert meta["num_test_runs"] == 3
     assert meta["dynamic_coverage_enabled"] is True
@@ -95,7 +95,7 @@ def test_build_metadata_with_file_arg() -> None:
         dynamically_executed_functions=0,
         files_detected=1,
     )
-    assert meta["file_argument"] == "/proj/src/mod.py"
+    assert meta["file_argument"] == str(Path("/proj/src/mod.py"))
 
 
 def test_build_uncovered_entry_top_level() -> None:
