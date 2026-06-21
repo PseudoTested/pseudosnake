@@ -126,7 +126,7 @@ def test_build_file_entry() -> None:
     project = Path("/tmp/proj")
     file_path = project / "src" / "mod.py"
     entry = build_file_entry(file_path, project, [])
-    assert entry["file"] == "src/mod.py"
+    assert entry["file"] == str(Path("src/mod.py"))
     assert entry["functions"] == []
 
 
