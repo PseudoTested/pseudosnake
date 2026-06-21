@@ -302,7 +302,9 @@ def test_collect_executed_function_keys_zero_count_not_executed(tmp_path: Path) 
     assert len(result) == 0
 
 
-def test_collect_executed_function_keys_missing_file_in_coverage(tmp_path: Path) -> None:
+def test_collect_executed_function_keys_missing_file_in_coverage(
+    tmp_path: Path,
+) -> None:
     """collect_executed_function_keys handles missing file in coverage data."""
     source_file = tmp_path / "mod.py"
 
@@ -331,15 +333,25 @@ def test_collect_test_to_function_map_nested_format(tmp_path: Path) -> None:
     source_file = tmp_path / "mod.py"
 
     func1 = FunctionInfo(
-        name="foo", class_name=None, file_path=source_file,
-        line_number=1, body_start_line=2, end_line=3,
-        body_col_offset=0, return_type="int",
+        name="foo",
+        class_name=None,
+        file_path=source_file,
+        line_number=1,
+        body_start_line=2,
+        end_line=3,
+        body_col_offset=0,
+        return_type="int",
     )
 
     func2 = FunctionInfo(
-        name="bar", class_name=None, file_path=source_file,
-        line_number=5, body_start_line=6, end_line=7,
-        body_col_offset=0, return_type="str",
+        name="bar",
+        class_name=None,
+        file_path=source_file,
+        line_number=5,
+        body_start_line=6,
+        end_line=7,
+        body_col_offset=0,
+        return_type="str",
     )
 
     relative = str(source_file.relative_to(tmp_path))
@@ -365,15 +377,18 @@ def test_collect_test_to_function_map_legacy_format_ignored(tmp_path: Path) -> N
     source_file = tmp_path / "mod.py"
 
     func = FunctionInfo(
-        name="foo", class_name=None, file_path=source_file,
-        line_number=1, body_start_line=2, end_line=3,
-        body_col_offset=0, return_type="int",
+        name="foo",
+        class_name=None,
+        file_path=source_file,
+        line_number=1,
+        body_start_line=2,
+        end_line=3,
+        body_col_offset=0,
+        return_type="int",
     )
 
     relative = str(source_file.relative_to(tmp_path))
-    coverage_results = {
-        relative: {function_key(func): 10}
-    }
+    coverage_results = {relative: {function_key(func): 10}}
 
     result = collect_test_to_function_map(source_file, tmp_path, coverage_results)
     assert len(result) == 0
