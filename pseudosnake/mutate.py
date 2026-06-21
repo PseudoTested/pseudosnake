@@ -56,8 +56,7 @@ def apply_mutant(
     # lines before the first body statement (def + decorators + docstring)
     before = source_lines[: func_info.body_start_line - 1]
     # lines after the function's closing line (following functions/trailing code)
-    after = source_lines[func_info.end_line:]
+    after = source_lines[func_info.end_line :]
 
     # splice: keep the signature, replace the body, keep trailing code
     return before + [replacement] + after
-

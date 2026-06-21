@@ -11,6 +11,7 @@ from pseudosnake.runner import RunResult, extract_failed_tests, extract_pytest_c
 
 # mutant-level entry
 
+
 def build_mutant_entry(
     mutation: str,
     test_result: RunResult,

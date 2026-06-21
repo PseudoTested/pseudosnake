@@ -173,7 +173,7 @@ def _make_function_info(
         file_path=file_path,
         line_number=node.lineno,  # line of the "def" statement
         body_start_line=body_node.lineno,  # line of first body statement
-        end_line=node.end_lineno,  # line of closing scope  # type: ignore[arg-type]
+        end_line=node.end_lineno or body_node.lineno,
         body_col_offset=body_node.col_offset,  # indentation of body
         return_type=_extract_return_type(node),
     )
