@@ -213,10 +213,9 @@ def test_collect_executed_function_keys_no_executed(tmp_path: Path) -> None:
     assert executed == []
 
 
-def test_collect_executed_function_keys_with_nested_format() -> None:
+def test_collect_executed_function_keys_with_nested_format(tmp_path: Path) -> None:
     """collect_executed_function_keys handles new nested caller-aware format."""
-    source_file = Path("pseudosnake/main.py")
-    project_dir = Path(".")
+    source_file = tmp_path / "mod.py"
 
     func = FunctionInfo(
         name="test_func",
@@ -229,24 +228,24 @@ def test_collect_executed_function_keys_with_nested_format() -> None:
         return_type="int",
     )
 
+    relative = str(source_file.relative_to(tmp_path))
     coverage_results = {
-        "pseudosnake/main.py": {
+        relative: {
             function_key(func): {"total": 5, "by_test": {"test_x": 3, "test_y": 2}},
         }
     }
 
     result = collect_executed_function_keys(
-        source_file, project_dir, [func], coverage_results
+        source_file, tmp_path, [func], coverage_results
     )
 
     assert len(result) == 1
     assert function_key(func) in result
 
 
-def test_collect_executed_function_keys_with_legacy_format() -> None:
+def test_collect_executed_function_keys_with_legacy_format(tmp_path: Path) -> None:
     """collect_executed_function_keys handles legacy flat format {func: int}."""
-    source_file = Path("pseudosnake/main.py")
-    project_dir = Path(".")
+    source_file = tmp_path / "mod.py"
 
     func = FunctionInfo(
         name="test_func",
@@ -259,24 +258,24 @@ def test_collect_executed_function_keys_with_legacy_format() -> None:
         return_type="int",
     )
 
+    relative = str(source_file.relative_to(tmp_path))
     coverage_results = {
-        "pseudosnake/main.py": {
+        relative: {
             function_key(func): 10,
         }
     }
 
     result = collect_executed_function_keys(
-        source_file, project_dir, [func], coverage_results
+        source_file, tmp_path, [func], coverage_results
     )
 
     assert len(result) == 1
     assert function_key(func) in result
 
 
-def test_collect_executed_function_keys_zero_count_not_executed() -> None:
+def test_collect_executed_function_keys_zero_count_not_executed(tmp_path: Path) -> None:
     """collect_executed_function_keys skips functions with zero count."""
-    source_file = Path("pseudosnake/main.py")
-    project_dir = Path(".")
+    source_file = tmp_path / "mod.py"
 
     func = FunctionInfo(
         name="test_func",
@@ -289,23 +288,23 @@ def test_collect_executed_function_keys_zero_count_not_executed() -> None:
         return_type="int",
     )
 
+    relative = str(source_file.relative_to(tmp_path))
     coverage_results = {
-        "pseudosnake/main.py": {
+        relative: {
             function_key(func): {"total": 0, "by_test": {}},
         }
     }
 
     result = collect_executed_function_keys(
-        source_file, project_dir, [func], coverage_results
+        source_file, tmp_path, [func], coverage_results
     )
 
     assert len(result) == 0
 
 
-def test_collect_executed_function_keys_missing_file_in_coverage() -> None:
+def test_collect_executed_function_keys_missing_file_in_coverage(tmp_path: Path) -> None:
     """collect_executed_function_keys handles missing file in coverage data."""
-    source_file = Path("pseudosnake/main.py")
-    project_dir = Path(".")
+    source_file = tmp_path / "mod.py"
 
     func = FunctionInfo(
         name="test_func",
@@ -321,47 +320,37 @@ def test_collect_executed_function_keys_missing_file_in_coverage() -> None:
     coverage_results = {}
 
     result = collect_executed_function_keys(
-        source_file, project_dir, [func], coverage_results
+        source_file, tmp_path, [func], coverage_results
     )
 
     assert len(result) == 0
 
 
-def test_collect_test_to_function_map_nested_format() -> None:
+def test_collect_test_to_function_map_nested_format(tmp_path: Path) -> None:
     """collect_test_to_function_map extracts test-to-function mapping from nested format."""
-    source_file = Path("pseudosnake/main.py")
-    project_dir = Path(".")
+    source_file = tmp_path / "mod.py"
 
     func1 = FunctionInfo(
-        name="foo",
-        class_name=None,
-        file_path=source_file,
-        line_number=1,
-        body_start_line=2,
-        end_line=3,
-        body_col_offset=0,
-        return_type="int",
+        name="foo", class_name=None, file_path=source_file,
+        line_number=1, body_start_line=2, end_line=3,
+        body_col_offset=0, return_type="int",
     )
 
     func2 = FunctionInfo(
-        name="bar",
-        class_name=None,
-        file_path=source_file,
-        line_number=5,
-        body_start_line=6,
-        end_line=7,
-        body_col_offset=0,
-        return_type="str",
+        name="bar", class_name=None, file_path=source_file,
+        line_number=5, body_start_line=6, end_line=7,
+        body_col_offset=0, return_type="str",
     )
 
+    relative = str(source_file.relative_to(tmp_path))
     coverage_results = {
-        "pseudosnake/main.py": {
+        relative: {
             function_key(func1): {"total": 5, "by_test": {"test_x": 3, "test_y": 2}},
             function_key(func2): {"total": 2, "by_test": {"test_x": 2}},
         }
     }
 
-    result = collect_test_to_function_map(source_file, project_dir, coverage_results)
+    result = collect_test_to_function_map(source_file, tmp_path, coverage_results)
 
     assert "test_x" in result
     assert "test_y" in result
@@ -371,40 +360,27 @@ def test_collect_test_to_function_map_nested_format() -> None:
     assert function_key(func2) not in result["test_y"]
 
 
-def test_collect_test_to_function_map_legacy_format_ignored() -> None:
+def test_collect_test_to_function_map_legacy_format_ignored(tmp_path: Path) -> None:
     """collect_test_to_function_map ignores legacy flat format data."""
-    source_file = Path("pseudosnake/main.py")
-    project_dir = Path(".")
+    source_file = tmp_path / "mod.py"
 
     func = FunctionInfo(
-        name="foo",
-        class_name=None,
-        file_path=source_file,
-        line_number=1,
-        body_start_line=2,
-        end_line=3,
-        body_col_offset=0,
-        return_type="int",
+        name="foo", class_name=None, file_path=source_file,
+        line_number=1, body_start_line=2, end_line=3,
+        body_col_offset=0, return_type="int",
     )
 
+    relative = str(source_file.relative_to(tmp_path))
     coverage_results = {
-        "pseudosnake/main.py": {
-            function_key(func): 10,
-        }
+        relative: {function_key(func): 10}
     }
 
-    result = collect_test_to_function_map(source_file, project_dir, coverage_results)
-
+    result = collect_test_to_function_map(source_file, tmp_path, coverage_results)
     assert len(result) == 0
 
 
-def test_collect_test_to_function_map_no_data() -> None:
+def test_collect_test_to_function_map_no_data(tmp_path: Path) -> None:
     """collect_test_to_function_map handles missing coverage data gracefully."""
-    source_file = Path("pseudosnake/main.py")
-    project_dir = Path(".")
-
-    coverage_results = {}
-
-    result = collect_test_to_function_map(source_file, project_dir, coverage_results)
-
+    source_file = tmp_path / "mod.py"
+    result = collect_test_to_function_map(source_file, tmp_path, {})
     assert result == {}
