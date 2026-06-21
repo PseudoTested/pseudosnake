@@ -39,19 +39,19 @@ def test_classify_result_crash() -> None:
 
 def test_run_tests_captures_exit_code(tmp_path: Path) -> None:
     """run_tests returns the actual exit code from the subprocess."""
-    result = run_tests("python -c 'raise SystemExit(0)'", tmp_path)
+    result = run_tests('python -c "raise SystemExit(0)"', tmp_path)
     assert result.exit_code == 0
 
 
 def test_run_tests_captures_nonzero_exit(tmp_path: Path) -> None:
     """run_tests captures non-zero exit codes correctly."""
-    result = run_tests("python -c 'raise SystemExit(42)'", tmp_path)
+    result = run_tests('python -c "raise SystemExit(42)"', tmp_path)
     assert result.exit_code == 42
 
 
 def test_run_tests_records_duration(tmp_path: Path) -> None:
     """run_tests records a positive duration."""
-    result = run_tests("python -c 'pass'", tmp_path)
+    result = run_tests('python -c "pass"', tmp_path)
     assert result.duration >= 0.0
 
 

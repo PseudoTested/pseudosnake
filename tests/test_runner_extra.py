@@ -100,7 +100,7 @@ def test_run_tests_with_env_passes_env_vars(tmp_path: Path) -> None:
 
 def test_run_tests_with_env_no_extra_env(tmp_path: Path) -> None:
     """run_tests_with_env works with None extra_env."""
-    result = run_tests_with_env("python -c 'print(1)'", tmp_path)
+    result = run_tests_with_env('python -c "print(1)"', tmp_path)
     assert result.exit_code == 0
     assert "1" in result.stdout
 
