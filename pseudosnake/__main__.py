@@ -2,5 +2,6 @@
 
 from pseudosnake.main import app
 
-# invoke the typer cli application
-app()
+if __name__ == "__main__":
+    # invoke the typer cli application
+    app()

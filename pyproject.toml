@@ -55,7 +55,7 @@ package = true
 project = "pseudosnake"
 tests = "tests"
 ruff-check-command = { var = "ruff check {project} {tests}", recursive = true }
-coverage-test-command = "pytest -s --cov=pseudosnake --cov-branch --cov-fail-under=58 --cov-report=term-missing tests/"
+coverage-test-command = "pytest --cov=pseudosnake --cov-branch --cov-fail-under=80 --cov-report=term-missing tests/"
 coverage-test-command-silent = "pytest -x --show-capture=no --cov-report term-missing --cov-report json --cov --cov-branch"
 developer-test-command = "pytest -x -s"
 developer-test-silent-command = "pytest -x --show-capture=no"
