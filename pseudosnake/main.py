@@ -21,11 +21,8 @@ Pipeline overview
    and metadata about the run.
 """
 
-import platform
-import sys
 import tempfile
 from datetime import datetime, timezone
-from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +30,12 @@ import typer
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from pseudosnake.backup import backup_file, cleanup_backup, get_backup_dir, restore_file
+from pseudosnake.backup import backup_file, cleanup_backup, restore_file
+from pseudosnake.helpers import (
+    build_metadata,
+    build_uncovered_entry,
+    digest,
+)
 from pseudosnake.discover import (
     FunctionInfo,
     find_functions,
@@ -281,7 +283,7 @@ def _process_file(
         else:
             # function was never executed — skip mutation, mark as uncovered
             console.print(f"  [dim]Not covered[/] [dim]{f.name}[/] - skipping")
-            function_entries.append(_build_uncovered_entry(f))
+            function_entries.append(build_uncovered_entry(f))
 
     return build_file_entry(file_path, project_dir, function_entries)
 
@@ -394,9 +396,9 @@ def _run_single_mutant(
     verification = {
         "mutation_applied": mutation_applied,
         "mutation_restored": mutation_restored,
-        "original_sha256": _digest(original_source),
-        "mutated_sha256": _digest(mutated_source),
-        "restored_sha256": _digest(restored_source),
+        "original_sha256": digest(original_source),
+        "mutated_sha256": digest(mutated_source),
+        "restored_sha256": digest(restored_source),
     }
     # collect per-run exit codes for transparency
     run_exit_codes = [run.exit_code for run in repeated.per_run]
@@ -404,21 +406,6 @@ def _run_single_mutant(
 
 
 # helpers
-
-
-def _build_uncovered_entry(func_info: FunctionInfo) -> dict[str, Any]:
-    """Build a minimal report entry for a function that was never executed."""
-    entry: dict[str, Any] = {
-        "function_name": func_info.name,
-        "line_number": func_info.line_number,
-        "return_type": func_info.return_type,
-        "covered": False,  # marks this function as not reached by any test
-        "mutants": [],  # no mutants were run, so the list is empty
-    }
-    # include class name for methods
-    if func_info.class_name is not None:
-        entry["class_name"] = func_info.class_name
-    return entry
 
 
 # colour mapping for mutant status labels in terminal output
@@ -435,47 +422,6 @@ def _print_mutant_result(func_name: str, mutant: str, status: str) -> None:
     # map the status string to a colour (default white for unknown)
     colour = _MUTANT_COLOURS.get(status, "white")
     console.print(f"  [{colour}]{status}[/] [dim]{func_name}[/] → {mutant}")
-
-
-def _digest(content: str) -> str:
-    """Return a SHA-256 hex digest of *content*.
-
-    Used to verify that mutations were correctly applied and restored
-    by comparing hashes of the original, mutated, and restored source.
-    """
-    return sha256(content.encode("utf-8")).hexdigest()
-
-
-def _build_metadata(
-    start_time: datetime,
-    end_time: datetime,
-    project_dir: Path,
-    source_dir: Path | None,
-    file_arg: Path | None,
-    output_file: Path | None,
-    test_command: str,
-    num_test_runs: int,
-    dynamic_coverage_enabled: bool,
-    dynamically_executed_functions: int,
-    files_detected: int,
-) -> dict[str, Any]:
-    """Assemble the metadata section of the final JSON report."""
-    return {
-        "start_time": start_time.isoformat(),
-        "end_time": end_time.isoformat(),
-        "project_directory": str(project_dir),
-        "source_directory": str(source_dir) if source_dir else None,
-        "file_argument": str(file_arg) if file_arg else None,
-        "output_file": str(output_file) if output_file else None,
-        "test_command": test_command,
-        "num_test_runs": num_test_runs,
-        "dynamic_coverage_enabled": dynamic_coverage_enabled,
-        "dynamically_executed_functions": dynamically_executed_functions,
-        "python_version": sys.version,
-        "operating_system": platform.system(),
-        "backup_directory": str(get_backup_dir()),
-        "files_detected": files_detected,
-    }
 
 
 # cli command
@@ -594,7 +540,7 @@ def analyze(
     # phase 3: report
     end_time = datetime.now(timezone.utc)
     # assemble the metadata section
-    metadata = _build_metadata(
+    metadata = build_metadata(
         start_time,
         end_time,
         project_dir,

@@ -1,0 +1,25 @@
+{
+    "version": "0.2",
+    "words": [
+        "pseudosnake",
+        "pytest",
+        "typecheck",
+        "typechecked",
+        "mypy",
+        "pyrefly",
+        "symbex",
+        "gatorgrade",
+        "pseudo",
+        "libcst",
+        "platformdirs",
+        "taskipy",
+        "psutil",
+        "atexit",
+        "coverage",
+        "cosmic-ray",
+        "typer",
+        "venv",
+        "pycache",
+        "ruff"
+    ]
+}
