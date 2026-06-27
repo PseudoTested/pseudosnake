@@ -5,7 +5,7 @@ Pipeline overview
 1. **Baseline validation** — run the test suite N times on the unmodified
    project.  If it ever fails, the project is unstable; abort.
 
-2. **Optional dynamic coverage** — instrument every source and test file
+2. **Dynamic coverage** — instrument every source and test file
    with lightweight call counters, run the test suite, and record which
    functions were actually executed (and *which tests* called them).
 
@@ -47,6 +47,7 @@ from pseudosnake.dynamic_coverage import (
     function_key,
     instrument_file_source,
     instrument_test_file,
+    is_already_instrumented,
     load_dynamic_coverage_results,
 )
 from pseudosnake.mutate import apply_mutant, generate_mutants
@@ -104,6 +105,12 @@ def _validate_baseline(
     console.print(
         f"Observed baseline exit codes across {num_test_runs} run(s): {exit_codes}"
     )
+    # print the stderr from the first failing run for debugging
+    for run in baseline.per_run:
+        if run.exit_code != 0:
+            console.print("[bold]Output from first failing run:[/bold]")
+            console.print(run.stderr or run.stdout or "(no output)")
+            break
 
     # exit code 5 means pytest found no tests — likely a wrong project-dir
     if baseline.overall.exit_code == 5:
@@ -116,7 +123,7 @@ def _validate_baseline(
     raise typer.Exit(code=2)
 
 
-# phase 1 — dynamic coverage (optional)
+# phase 1 — dynamic coverage
 
 
 def _run_dynamic_coverage_phase(
@@ -142,30 +149,44 @@ def _run_dynamic_coverage_phase(
         # instrument test files
         total_tests = 0
         for test_path in test_files:
-            # find all test functions in this file
+            source = test_path.read_text(encoding="utf-8")
+            if is_already_instrumented(source):
+                console.print(
+                    f"  [yellow]Warning: {test_path.name} already instrumented"
+                    f" from a prior run — skipping[/yellow]"
+                )
+                continue
             test_funcs = find_functions(test_path)
             if not test_funcs:
                 continue
             # back up the original test file
             backups[test_path] = backup_file(test_path)
-            source = test_path.read_text(encoding="utf-8")
             relative = str(test_path.relative_to(project_dir))
-            # inject __ps_ctx__[0] = "test_name" into each test function
+            # inject __ps_ctx__.append("test_name") into each test function
             instrumented = instrument_test_file(source, test_funcs, relative)
             test_path.write_text(instrumented, encoding="utf-8")
             total_tests += len(test_funcs)
             console.print(f"  Instrumented {len(test_funcs)} test(s) in {relative}")
 
-        # instrument source files
+        # instrument source files (skip any that were already instrumented as tests)
+        already_instrumented = set(backups.keys())
         instrumented_count = 0
         for file_path in files:
+            if file_path in already_instrumented:
+                continue
+            source = file_path.read_text(encoding="utf-8")
+            if is_already_instrumented(source):
+                console.print(
+                    f"  [yellow]Warning: {file_path.name} already instrumented"
+                    f" from a prior run — skipping[/yellow]"
+                )
+                continue
             # find all functions in this source file
             functions = find_functions(file_path)
             if not functions:
                 continue
             # back up the original source file
             backups[file_path] = backup_file(file_path)
-            source = file_path.read_text(encoding="utf-8")
             relative = str(file_path.relative_to(project_dir))
             # inject hit counters into each function body
             instrumented = instrument_file_source(source, functions, relative)
@@ -227,8 +248,25 @@ def _run_dynamic_coverage_phase(
     finally:
         # restore every modified file to its original content
         for file_path, backup in backups.items():
-            restore_file(file_path, backup)
-            cleanup_backup(backup)
+            try:
+                restore_file(file_path, backup)
+                # verify the restore actually put back different content
+                current = file_path.read_text(encoding="utf-8")
+                backup_content = backup.read_text(encoding="utf-8")
+                if current != backup_content:
+                    console.print(
+                        f"  [bold red]ERROR: restore verification failed for"
+                        f" {file_path.relative_to(project_dir)}[/bold red]"
+                    )
+            except Exception as exc:
+                console.print(
+                    f"  [yellow]Warning: failed to restore"
+                    f" {file_path.relative_to(project_dir)}: {exc}[/yellow]"
+                )
+            try:
+                cleanup_backup(backup)
+            except Exception:
+                pass  # best-effort cleanup — don't prevent restoring other files
 
 
 # phase 2 — mutation testing
@@ -455,11 +493,6 @@ def analyze(
         min=1,
         help="Number of repeated full test-suite runs for baseline and each mutant.",
     ),
-    experimental_dynamic_coverage: bool = typer.Option(
-        False,
-        "--experimental-dynamic-coverage",
-        help="Run a dynamic function-coverage collection phase before mutation.",
-    ),
     output: Path | None = typer.Option(
         None,
         "--output",
@@ -500,20 +533,15 @@ def analyze(
         f"[bold green]PseudoSnake[/] found [cyan]{len(files)}[/] file(s) to analyse."
     )
 
-    # phase 1: dynamic coverage (optional)
+    # phase 1: dynamic coverage
     # coverage_map: {relative_file_path: {executed_function_key, ...}}
-    coverage_map: dict[str, set[str]] = {}
-    dynamically_executed_functions = 0
-    if experimental_dynamic_coverage:
-        console.print("[bold]Running experimental dynamic coverage phase...[/bold]")
-        # instrument code, run tests with counters, collect coverage data
-        coverage_map = _run_dynamic_coverage_phase(files, project_dir, test_command)
-        # count total executed functions across all files
-        dynamically_executed_functions = sum(len(v) for v in coverage_map.values())
-        console.print(
-            f"[cyan]Coverage collected for "
-            f"{dynamically_executed_functions} function(s).[/cyan]"
-        )
+    console.print("[bold]Running dynamic coverage phase...[/bold]")
+    coverage_map = _run_dynamic_coverage_phase(files, project_dir, test_command)
+    dynamically_executed_functions = sum(len(v) for v in coverage_map.values())
+    console.print(
+        f"[cyan]Coverage collected for "
+        f"{dynamically_executed_functions} function(s).[/cyan]"
+    )
 
     # phase 2: mutation testing
     file_entries: list[dict[str, Any]] = []
@@ -549,7 +577,6 @@ def analyze(
         resolved_output,
         test_command,
         num_test_runs,
-        experimental_dynamic_coverage,
         dynamically_executed_functions,
         len(files),
     )

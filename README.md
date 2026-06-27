@@ -24,7 +24,7 @@ uv tool install pseudosnake
 ## Usage
 
 ```bash
-pseudosnake --project-dir path-to-project --source-dir source-dir-name --test-command "uv run pytest" --num-test-runs 1 --experimental-dynamic-coverage
+pseudosnake --project-dir path-to-project --source-dir source-dir-name --test-command "uv run pytest" --num-test-runs 1
 ```
 
 ## Development Setup

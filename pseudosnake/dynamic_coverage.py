@@ -36,6 +36,17 @@ from pathlib import Path
 from pseudosnake.discover import FunctionInfo
 
 
+# marker string injected into every instrumented file — used as an
+# idempotency guard so re-instrumenting an already-instrumented file
+# is a no-op
+_INSTRUMENTATION_MARKER = "# PseudoSnake experimental dynamic coverage instrumentation"
+
+
+def is_already_instrumented(source: str) -> bool:
+    """Return True if *source* already contains PseudoSnake instrumentation."""
+    return _INSTRUMENTATION_MARKER in source
+
+
 # stable function identity
 
 
@@ -69,6 +80,10 @@ def instrument_file_source(
     if not functions:
         return source
 
+    # idempotency guard: if already instrumented, return unchanged
+    if _INSTRUMENTATION_MARKER in source:
+        return source
+
     # split into lines, preserving trailing newlines
     lines = source.splitlines(keepends=True)
     instrumented = list(lines)
@@ -79,12 +94,12 @@ def instrument_file_source(
         indent = " " * func.body_col_offset  # match the function's indentation
         key = function_key(func)
         # three-line tracking snippet injected at the top of the function body:
-        #   _t = __ps_ctx__[0] or '_no_test_'    ← who called me?
-        #   _k = _t + '\x00' + "func_name"       ← build the counter key
-        #   __pseudosnake_cov__[_k] += 1          ← increment the counter
+        #   _t = __ps_ctx__[-1] if __ps_ctx__ else '_no_test_'  ← who called me?
+        #   _k = _t + '\x00' + "func_name"                       ← build counter key
+        #   __pseudosnake_cov__[_k] += 1                          ← increment counter
         counter_stanza = (
             indent
-            + "_t = __ps_ctx__[0] or '_no_test_'\n"
+            + "_t = __ps_ctx__[-1] if __ps_ctx__ else '_no_test_'\n"
             + indent
             + "_k = _t + '\\x00' + "
             + repr(key)
@@ -112,13 +127,17 @@ def instrument_test_file(
     test_functions: list[FunctionInfo],
     file_label: str,
 ) -> str:
-    """Return *source* with ``__ps_ctx__[0] = "test_name"`` injected into tests.
+    """Return *source* with ``__ps_ctx__.append("test_name")`` injected into tests.
 
-    Each test function body starts with a line that announces to the shared
-    context which test is currently executing.  When a source function is
+    Each test function body starts with a line that pushes onto the shared
+    context stack which test is currently executing.  When a source function is
     called from within that test, its counter will attribute the hit correctly.
     """
     if not test_functions:
+        return source
+
+    # idempotency guard: if already instrumented, return unchanged
+    if _INSTRUMENTATION_MARKER in source:
         return source
 
     lines = source.splitlines(keepends=True)
@@ -127,8 +146,8 @@ def instrument_test_file(
     # inject marker at top of each test function body (reverse order for safety)
     for func in sorted(test_functions, key=lambda f: f.body_start_line, reverse=True):
         indent = " " * func.body_col_offset
-        # single-line marker: set the shared context to this test's name
-        marker = indent + "__ps_ctx__[0] = " + repr(func.name) + "\n"
+        # push this test's name onto the shared context stack
+        marker = indent + "__ps_ctx__.append(" + repr(func.name) + ")\n"
         insert_at = func.body_start_line - 1
         instrumented[insert_at:insert_at] = [marker]
 
@@ -164,7 +183,7 @@ def _build_header_block(file_label: str) -> str:
         # same list object, so test files can write to it and source files
         # can read from it
         "if not hasattr(__ps_builtins__, '_pseudosnake_ctx'):\n"
-        "    __ps_builtins__._pseudosnake_ctx = [None]\n"
+        "    __ps_builtins__._pseudosnake_ctx = []\n"
         "__ps_ctx__ = __ps_builtins__._pseudosnake_ctx\n"
         "\n"
         # per-file counter dict: maps "test_name\x00func_name" -> hit count
@@ -220,7 +239,8 @@ def _find_module_insert_index(lines: list[str]) -> int:
     """Return the line index after shebang, encoding, docstring, and future imports.
 
     The instrumentation header is injected here so it doesn't interfere
-    with any of those module-level constructs.
+    with any of those module-level constructs.  Existing PseudoSnake
+    instrumentation is also skipped to prevent duplication.
     """
     idx = 0
 
@@ -249,6 +269,23 @@ def _find_module_insert_index(lines: list[str]) -> int:
     # skip from __future__ import lines (must be at top of file)
     while idx < len(lines) and lines[idx].startswith("from __future__ import"):
         idx += 1
+
+    # skip existing PseudoSnake instrumentation to prevent duplication
+    # the header block starts with "\n# PseudoSnake ..." so the marker may
+    # appear on lines[idx] (blank) + 1, or on lines[idx] directly if the
+    # source has no leading blank line between the header and prior content
+    marker_found = (idx < len(lines) and _INSTRUMENTATION_MARKER in lines[idx]) or (
+        idx + 1 < len(lines) and _INSTRUMENTATION_MARKER in lines[idx + 1]
+    )
+    if marker_found:
+        # skip past entire instrumentation block until the next blank line
+        # followed by non-blank content (the original source continues there)
+        while idx < len(lines):
+            line = lines[idx].rstrip("\n").rstrip("\r")
+            if line == "" and idx + 1 < len(lines) and lines[idx + 1].strip() != "":
+                idx += 1
+                break
+            idx += 1
 
     return idx
 

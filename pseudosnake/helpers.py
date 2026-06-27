@@ -44,7 +44,6 @@ def build_metadata(
     output_file: Path | None,
     test_command: str,
     num_test_runs: int,
-    dynamic_coverage_enabled: bool,
     dynamically_executed_functions: int,
     files_detected: int,
 ) -> dict[str, Any]:
@@ -58,7 +57,7 @@ def build_metadata(
         "output_file": str(output_file) if output_file else None,
         "test_command": test_command,
         "num_test_runs": num_test_runs,
-        "dynamic_coverage_enabled": dynamic_coverage_enabled,
+        "dynamic_coverage_enabled": True,
         "dynamically_executed_functions": dynamically_executed_functions,
         "python_version": sys.version,
         "operating_system": platform.system(),

@@ -55,13 +55,21 @@ def _in_excluded_dir(path: Path) -> bool:
     return bool(_EXCLUDED_PARTS.intersection(path.parts))
 
 
-def is_test_file(path: Path) -> bool:
+def is_test_file(path: Path, project_dir: Path | None = None) -> bool:
     """Return True if the path matches common test-file patterns."""
     name = path.name
-    # match test_*.py, *_test.py, or anything inside a tests/ directory
-    return (
-        name.startswith("test_") or name.endswith("_test.py") or "tests" in path.parts
-    )
+    # match test_*.py or *_test.py by filename
+    if name.startswith("test_") or name.endswith("_test.py"):
+        return True
+    # match anything inside a tests/ directory, relative to project_dir
+    if project_dir is not None:
+        try:
+            relative = path.relative_to(project_dir)
+        except ValueError:
+            relative = path
+    else:
+        relative = path
+    return "tests" in relative.parts
 
 
 def find_test_files(project_dir: Path) -> list[Path]:
@@ -73,7 +81,7 @@ def find_test_files(project_dir: Path) -> list[Path]:
         if _in_excluded_dir(py_file):
             continue
         # only collect files that look like tests
-        if is_test_file(py_file):
+        if is_test_file(py_file, project_dir):
             test_files.append(py_file)
     return test_files
 
@@ -93,11 +101,16 @@ def find_python_files(
 
     # multi-file mode — determine the directory to scan
     search_root = _resolve_source_root(project_dir, source_dir)
+    if not search_root.is_dir():
+        raise FileNotFoundError(
+            f"Source directory not found: {search_root} ({search_root.resolve()}). "
+            "Check --project-dir and --source-dir."
+        )
     # recursively find .py files, skipping test files and excluded directories
     return [
         p
         for p in sorted(search_root.rglob("*.py"))
-        if not is_test_file(p) and not _in_excluded_dir(p)
+        if not is_test_file(p, project_dir) and not _in_excluded_dir(p)
     ]
 
 
@@ -122,6 +135,15 @@ def _resolve_source_root(project_dir: Path, source_dir: Path | None) -> Path:
 
 
 # function-level discovery (ast parsing)
+
+# function names with these prefixes are PseudoSnake's own instrumentation
+# and must never be treated as project functions during discovery
+_INTERNAL_PREFIXES = ("__pseudosnake_", "__ps_")
+
+
+def _is_internal_name(name: str) -> bool:
+    """Return True when *name* belongs to PseudoSnake's own instrumentation."""
+    return name.startswith(_INTERNAL_PREFIXES)
 
 
 def find_functions(file_path: Path) -> list[FunctionInfo]:
@@ -155,6 +177,9 @@ def _collect_functions(
             # recurse into class bodies, passing the class name as context
             _collect_functions(child, file_path, child.name, results)
         elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # skip PseudoSnake's own instrumentation functions
+            if _is_internal_name(child.name):
+                continue
             # found a function — extract metadata and add to results
             results.append(_make_function_info(child, file_path, class_name))
 

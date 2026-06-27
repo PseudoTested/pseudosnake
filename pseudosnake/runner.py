@@ -6,6 +6,7 @@ interference.  A *timeout* prevents hung processes from blocking the pipeline.
 """
 
 import re
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
@@ -53,8 +54,8 @@ def run_tests(
     try:
         # launch the test command as a subprocess with a timeout
         proc = subprocess.run(
-            test_command,
-            shell=True,  # allows complex commands like "pytest tests/ -x"
+            shlex.split(test_command),
+            shell=False,
             cwd=project_dir,  # run from the project's root directory
             capture_output=True,  # capture stdout and stderr for parsing
             text=True,  # return strings, not bytes
@@ -102,8 +103,8 @@ def run_tests_with_env(
             env = dict(environ)
             env.update(extra_env)
         proc = subprocess.run(
-            test_command,
-            shell=True,
+            shlex.split(test_command),
+            shell=False,
             cwd=project_dir,
             capture_output=True,
             text=True,
