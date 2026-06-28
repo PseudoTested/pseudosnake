@@ -42,20 +42,26 @@ def test_classify_result_crash() -> None:
 
 def test_run_tests_captures_exit_code(tmp_path: Path) -> None:
     """run_tests returns the actual exit code from the subprocess."""
-    result = run_tests('python -c "raise SystemExit(0)"', tmp_path)
-    assert result.exit_code == 0
+    with patch("pseudosnake.runner.subprocess.run") as mock_run:
+        mock_run.return_value = Mock(returncode=0, stdout="ok", stderr="")
+        result = run_tests("pytest", tmp_path)
+        assert result.exit_code == 0
 
 
 def test_run_tests_captures_nonzero_exit(tmp_path: Path) -> None:
     """run_tests captures non-zero exit codes correctly."""
-    result = run_tests('python -c "raise SystemExit(42)"', tmp_path)
-    assert result.exit_code == 42
+    with patch("pseudosnake.runner.subprocess.run") as mock_run:
+        mock_run.return_value = Mock(returncode=42, stdout="", stderr="err")
+        result = run_tests("pytest", tmp_path)
+        assert result.exit_code == 42
 
 
 def test_run_tests_records_duration(tmp_path: Path) -> None:
     """run_tests records a positive duration."""
-    result = run_tests('python -c "pass"', tmp_path)
-    assert result.duration >= 0.0
+    with patch("pseudosnake.runner.subprocess.run") as mock_run:
+        mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
+        result = run_tests("pytest", tmp_path)
+        assert result.duration >= 0.0
 
 
 def test_extract_failed_tests_parses_pytest_summary_lines() -> None:
@@ -175,26 +181,28 @@ def test_extract_pytest_counts_no_counts() -> None:
 
 def test_run_tests_with_env_passes_env_vars(tmp_path: Path) -> None:
     """run_tests_with_env passes extra environment variables to the subprocess."""
-
-    script = tmp_path / "check_env.py"
-    script.write_text(
-        "import os\nprint(os.environ.get('PSEUDOSNAKE_TEST_VAR', 'NOT_SET'))\n"
-    )
-    result = run_tests_with_env(
-        f"python {script}",
-        tmp_path,
-        extra_env={"PSEUDOSNAKE_TEST_VAR": "hello"},
-    )
-    assert result.exit_code == 0
-    assert "hello" in result.stdout
-    assert "NOT_SET" not in result.stdout
+    with patch("pseudosnake.runner.subprocess.run") as mock_run:
+        mock_run.return_value = Mock(returncode=0, stdout="hello", stderr="")
+        result = run_tests_with_env(
+            "pytest",
+            tmp_path,
+            extra_env={"PSEUDOSNAKE_TEST_VAR": "hello"},
+        )
+        assert result.exit_code == 0
+        # Verify the env dict was constructed and passed to subprocess
+        _, kwargs = mock_run.call_args
+        assert kwargs["env"] is not None
+        assert kwargs["env"]["PSEUDOSNAKE_TEST_VAR"] == "hello"
 
 
 def test_run_tests_with_env_no_extra_env(tmp_path: Path) -> None:
     """run_tests_with_env works with None extra_env."""
-    result = run_tests_with_env('python -c "print(1)"', tmp_path)
-    assert result.exit_code == 0
-    assert "1" in result.stdout
+    with patch("pseudosnake.runner.subprocess.run") as mock_run:
+        mock_run.return_value = Mock(returncode=0, stdout="1", stderr="")
+        result = run_tests_with_env("pytest", tmp_path)
+        assert result.exit_code == 0
+        _, kwargs = mock_run.call_args
+        assert kwargs["env"] is None
 
 
 def test_aggregate_run_results_all_nonzero() -> None:
