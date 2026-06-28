@@ -5,12 +5,15 @@ mutate source files on disk and re-run the project's own test command without
 interference.  A *timeout* prevents hung processes from blocking the pipeline.
 """
 
+import os
 import re
 import shlex
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+_POSIX = os.name == "posix"
 
 
 # result types
@@ -54,7 +57,7 @@ def run_tests(
     try:
         # launch the test command as a subprocess with a timeout
         proc = subprocess.run(
-            shlex.split(test_command),
+            shlex.split(test_command, posix=_POSIX),
             shell=False,
             cwd=project_dir,  # run from the project's root directory
             capture_output=True,  # capture stdout and stderr for parsing
@@ -103,7 +106,7 @@ def run_tests_with_env(
             env = dict(environ)
             env.update(extra_env)
         proc = subprocess.run(
-            shlex.split(test_command),
+            shlex.split(test_command, posix=_POSIX),
             shell=False,
             cwd=project_dir,
             capture_output=True,
