@@ -22,6 +22,7 @@ Pipeline overview
 """
 
 import tempfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -138,9 +139,10 @@ def _run_dynamic_coverage_phase(
     """
     # keep track of backups so we can restore everything in the finally block
     backups: dict[Path, Path] = {}
-    # shared json file where all instrumented modules flush their counters
-    coverage_path = Path(tempfile.gettempdir()) / "pseudosnake_dynamic_coverage.json"
-    coverage_path.unlink(missing_ok=True)  # remove stale file from previous runs
+    coverage_path = (
+        Path(tempfile.gettempdir())
+        / f"pseudosnake_dynamic_coverage_{uuid.uuid4().hex}.json"
+    )
 
     # find test files in the project (excluding venv, caches, etc.)
     test_files = find_test_files(project_dir)
@@ -267,6 +269,10 @@ def _run_dynamic_coverage_phase(
                 cleanup_backup(backup)
             except Exception:
                 pass  # best-effort cleanup — don't prevent restoring other files
+        try:
+            coverage_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 # phase 2 — mutation testing
@@ -411,10 +417,18 @@ def _run_single_mutant(
     # write the mutated code back to disk
     file_path.write_text(mutated_source, encoding="utf-8")
 
-    # verify the mutation was actually written to disk correctly
+    # clear stale .pyc caches so Python recompiles from the mutated source.
+    # without this, @dataclass and other decorators can cache old bytecode
+    # and the mutant may never actually execute.
+    _clear_pyc_cache(file_path)
+
+    # verify the mutation was actually written to disk correctly.
+    # also verify that the function body now contains the expected mutant.
     on_disk_mutated = file_path.read_text(encoding="utf-8")
     mutation_applied = (
-        on_disk_mutated == mutated_source and on_disk_mutated != original_source
+        on_disk_mutated == mutated_source
+        and on_disk_mutated != original_source
+        and _verify_mutant_in_file(on_disk_mutated, func_info, mutant)
     )
 
     # step 2: run the test suite
@@ -444,6 +458,33 @@ def _run_single_mutant(
 
 
 # helpers
+
+
+def _clear_pyc_cache(file_path: Path) -> None:
+    """Delete stale .pyc caches so Python recompiles from the mutated source."""
+    cache_dir = file_path.parent / "__pycache__"
+    if not cache_dir.is_dir():
+        return
+    for pyc in cache_dir.iterdir():
+        try:
+            pyc.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _verify_mutant_in_file(
+    mutated_source: str, func_info: FunctionInfo, mutant: str
+) -> bool:
+    """Check that the mutated source contains the expected mutant in the target function."""
+    lines = mutated_source.split("\n")
+    # the body starts at body_start_line (1-indexed) and the replacement
+    # occupies exactly one line (the mutant statement)
+    body_line_idx = func_info.body_start_line - 1
+    if body_line_idx >= len(lines):
+        return False
+    actual = lines[body_line_idx].strip()
+    expected = mutant.strip()
+    return actual == expected
 
 
 # colour mapping for mutant status labels in terminal output

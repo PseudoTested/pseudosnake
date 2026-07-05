@@ -758,10 +758,10 @@ def test_dynamic_coverage_json_exists(tmp_path, monkeypatch):
     monkeypatch.setattr("pseudosnake.main.tempfile.gettempdir", lambda: str(fake_temp))
 
     # simulate the test runner writing the coverage JSON
+    # the coverage path is now unique per run, so read it from the env var
     def write_coverage_json(*a, **kw):
-        (fake_temp / "pseudosnake_dynamic_coverage.json").write_text(
-            '{"mod.py": {"f": 1}}'
-        )
+        cov_path = kw.get("extra_env", {}).get("PSEUDOSNAKE_DYN_COV_PATH", "")
+        Path(cov_path).write_text('{"mod.py": {"f": 1}}')
 
     monkeypatch.setattr(main, "run_tests_with_env", write_coverage_json)
     monkeypatch.setattr(main, "find_test_files", lambda pd: [])

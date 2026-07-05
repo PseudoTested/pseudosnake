@@ -10,6 +10,7 @@ from pseudosnake.report import (
     build_function_entry,
     build_mutant_entry,
     build_report,
+    compute_mutation_score,
     output_report,
 )
 from pseudosnake.runner import RunResult
@@ -178,3 +179,85 @@ def test_build_mutant_entry_crash_status() -> None:
     result = _make_run_result(exit_code=-1)
     entry = build_mutant_entry("return 0", result, "CRASH")
     assert entry["pseudo_tested"] is False
+
+
+def test_compute_mutation_score_empty() -> None:
+    """compute_mutation_score returns zeroes when there are no entries."""
+    score = compute_mutation_score([])
+    assert score["total_mutants"] == 0
+    assert score["testable_mutants"] == 0
+    assert score["KILLED"] == 0
+    assert score["SURVIVED"] == 0
+    assert score["NO_TESTS"] == 0
+    assert score["CRASH"] == 0
+    assert score["mutation_score"] == 0.0
+
+
+def test_compute_mutation_score_mixed() -> None:
+    """compute_mutation_score correctly counts mutants across file entries."""
+    killed = build_mutant_entry("return 0", _make_run_result(exit_code=1), "KILLED")
+    survived = build_mutant_entry(
+        "return None", _make_run_result(exit_code=0), "SURVIVED"
+    )
+    no_tests = build_mutant_entry("return 1", _make_run_result(exit_code=5), "NO_TESTS")
+    crash = build_mutant_entry("return 'x'", _make_run_result(exit_code=-1), "CRASH")
+
+    file_entries = [
+        {
+            "file": "a.py",
+            "functions": [
+                {"mutants": [killed, survived]},
+                {"mutants": [no_tests, crash]},
+            ],
+        },
+        {
+            "file": "b.py",
+            "functions": [
+                {"mutants": [killed]},
+            ],
+        },
+    ]
+    score = compute_mutation_score(file_entries)
+    assert score["total_mutants"] == 5
+    assert score["testable_mutants"] == 3  # 2 killed + 1 survived
+    assert score["KILLED"] == 2
+    assert score["SURVIVED"] == 1
+    assert score["NO_TESTS"] == 1
+    assert score["CRASH"] == 1
+    assert score["mutation_score"] == round(2 / 3 * 100, 2)
+
+
+def test_compute_mutation_score_100_percent() -> None:
+    """compute_mutation_score returns 100 when all testable mutants are killed."""
+    killed = build_mutant_entry("return 0", _make_run_result(exit_code=1), "KILLED")
+    file_entries = [{"file": "a.py", "functions": [{"mutants": [killed, killed]}]}]
+    score = compute_mutation_score(file_entries)
+    assert score["mutation_score"] == 100.0
+    assert score["KILLED"] == 2
+    assert score["SURVIVED"] == 0
+
+
+def test_compute_mutation_score_0_percent() -> None:
+    """compute_mutation_score returns 0 when all testable mutants survive."""
+    survived = build_mutant_entry(
+        "return None", _make_run_result(exit_code=0), "SURVIVED"
+    )
+    file_entries = [{"file": "a.py", "functions": [{"mutants": [survived]}]}]
+    score = compute_mutation_score(file_entries)
+    assert score["mutation_score"] == 0.0
+    assert score["KILLED"] == 0
+
+
+def test_compute_mutation_score_includes_in_build_report() -> None:
+    """build_report output now includes the mutation_score_summary key."""
+    killed = build_mutant_entry("return 0", _make_run_result(exit_code=1), "KILLED")
+    survived = build_mutant_entry(
+        "return None", _make_run_result(exit_code=0), "SURVIVED"
+    )
+    file_entries = [{"file": "a.py", "functions": [{"mutants": [killed, survived]}]}]
+    report = build_report({}, file_entries)
+    summary = report["mutation_score_summary"]
+    assert summary["total_mutants"] == 2
+    assert summary["KILLED"] == 1
+    assert summary["SURVIVED"] == 1
+    assert summary["mutation_score"] == 50.0

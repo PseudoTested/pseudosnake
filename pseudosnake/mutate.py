@@ -22,7 +22,7 @@ MUTANTS_BY_TYPE: dict[str, list[str]] = {
     "dict": ["return {}", "return None"],
     "tuple": ["return ()", "return None"],
     "set": ["return set()", "return None"],
-    "none": ["return None"],
+    "none": [],  # function already returns None — no meaningful mutant
     "optional": ["return None"],
     "any": ["return None"],
     "unknown": ["return None"],

@@ -88,6 +88,34 @@ def build_file_entry(
     }
 
 
+def compute_mutation_score(
+    file_entries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Count mutants by status across all file entries and compute the mutation score.
+
+    Mutation score = killed / (killed + survived), i.e. the fraction of
+    testable mutants that were actually caught by the test suite.
+    NO_TESTS and CRASH mutants are tracked but excluded from the denominator.
+    Returns a dict with per-status counts and the computed score.
+    """
+    counts = {"KILLED": 0, "SURVIVED": 0, "NO_TESTS": 0, "CRASH": 0}
+    for file_entry in file_entries:
+        for func_entry in file_entry.get("functions", []):
+            for mutant_entry in func_entry.get("mutants", []):
+                status = mutant_entry.get("status", "")
+                if status in counts:
+                    counts[status] += 1
+    total = sum(counts.values())
+    testable = counts["KILLED"] + counts["SURVIVED"]
+    score = round(counts["KILLED"] / testable * 100, 2) if testable > 0 else 0.0
+    return {
+        "total_mutants": total,
+        "testable_mutants": testable,
+        **counts,
+        "mutation_score": score,
+    }
+
+
 def build_report(
     metadata: dict[str, Any],
     file_entries: list[dict[str, Any]],
@@ -96,6 +124,7 @@ def build_report(
     return {
         "metadata": metadata,
         "files": file_entries,
+        "mutation_score_summary": compute_mutation_score(file_entries),
     }
 
 

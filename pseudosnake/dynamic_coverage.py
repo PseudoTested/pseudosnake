@@ -93,19 +93,30 @@ def instrument_file_source(
     for func in sorted(functions, key=lambda f: f.body_start_line, reverse=True):
         indent = " " * func.body_col_offset  # match the function's indentation
         key = function_key(func)
-        # three-line tracking snippet injected at the top of the function body:
-        #   _t = __ps_ctx__[-1] if __ps_ctx__ else '_no_test_'  ← who called me?
-        #   _k = _t + '\x00' + "func_name"                       ← build counter key
-        #   __pseudosnake_cov__[_k] += 1                          ← increment counter
+        # three-line tracking snippet injected at the top of the function body.
+        # wrapped in try/except so import-time execution (e.g. decorators)
+        # doesn't poison coverage if the instrumentation context isn't ready:
+        #   try:
+        #       _t = __ps_ctx__[-1] if __ps_ctx__ else '_no_test_'
+        #       _k = _t + '\x00' + "func_name"
+        #       __pseudosnake_cov__[_k] = __pseudosnake_cov__.get(_k, 0) + 1
+        #   except Exception:
+        #       pass
         counter_stanza = (
             indent
-            + "_t = __ps_ctx__[-1] if __ps_ctx__ else '_no_test_'\n"
+            + "try:\n"
             + indent
-            + "_k = _t + '\\x00' + "
+            + "    _t = __ps_ctx__[-1] if __ps_ctx__ else '_no_test_'\n"
+            + indent
+            + "    _k = _t + '\\x00' + "
             + repr(key)
             + "\n"
             + indent
-            + "__pseudosnake_cov__[_k] = __pseudosnake_cov__.get(_k, 0) + 1\n"
+            + "    __pseudosnake_cov__[_k] = __pseudosnake_cov__.get(_k, 0) + 1\n"
+            + indent
+            + "except Exception:\n"
+            + indent
+            + "    pass\n"
         )
         # insert before the first body statement (1-indexed → 0-indexed)
         insert_at = func.body_start_line - 1

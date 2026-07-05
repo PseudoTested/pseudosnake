@@ -18,8 +18,8 @@ def test_generate_mutants_bool() -> None:
 
 
 def test_generate_mutants_none() -> None:
-    """generate_mutants returns a single None mutant for none type."""
-    assert generate_mutants("none") == ["return None"]
+    """generate_mutants returns empty for none type — return None is a no-op."""
+    assert generate_mutants("none") == []
 
 
 def test_generate_mutants_unknown_falls_back() -> None:
@@ -28,10 +28,14 @@ def test_generate_mutants_unknown_falls_back() -> None:
 
 
 def test_generate_mutants_all_types_covered() -> None:
-    """Every key in MUTANTS_BY_TYPE should return a non-empty list."""
+    """Every key in MUTANTS_BY_TYPE should return a non-empty list
+    (except 'none' which has no meaningful mutant)."""
     for type_name in MUTANTS_BY_TYPE:
         mutants = generate_mutants(type_name)
-        assert len(mutants) >= 1, f"No mutants for type '{type_name}'"
+        if type_name == "none":
+            assert mutants == []
+        else:
+            assert len(mutants) >= 1, f"No mutants for type '{type_name}'"
 
 
 def _make_func_info(src: str, tmp_path: object) -> FunctionInfo:
