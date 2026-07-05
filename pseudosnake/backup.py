@@ -49,3 +49,57 @@ def cleanup_backup(backup_path: Path) -> None:
     """Delete the backup file (quietly no-ops if already gone)."""
     # missing_ok=True means no error if the file was already deleted
     backup_path.unlink(missing_ok=True)
+
+
+def get_snapshot_dir(snapshot_id: str) -> Path:
+    """Return the platform-appropriate path for a snapshot with given ID."""
+    return get_backup_dir() / "snapshots" / snapshot_id
+
+
+def create_snapshot(
+    files: list[Path], project_dir: Path, snapshot_id: str
+) -> Path:
+    """Snapshot *files* (relative to *project_dir*) into a run-specific directory.
+
+    Each file is copied into the snapshot directory, preserving its relative
+    path from *project_dir*.  Returns the path to the snapshot directory.
+    """
+    snapshot_dir = get_snapshot_dir(snapshot_id)
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    for file_path in files:
+        relative = file_path.relative_to(project_dir)
+        dest = snapshot_dir / relative
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(file_path, dest)
+    return snapshot_dir
+
+
+def restore_snapshot(snapshot_dir: Path, project_dir: Path) -> int:
+    """Restore all files from *snapshot_dir* back to *project_dir*.
+
+    Returns the number of files restored.
+    """
+    count = 0
+    for backup_file in sorted(snapshot_dir.rglob("*")):
+        if backup_file.is_file():
+            relative = backup_file.relative_to(snapshot_dir)
+            original = project_dir / relative
+            shutil.copy2(backup_file, original)
+            count += 1
+    return count
+
+
+def cleanup_snapshot(snapshot_dir: Path) -> None:
+    """Delete the snapshot directory and all contents."""
+    shutil.rmtree(snapshot_dir, ignore_errors=True)
+
+
+def list_snapshots() -> list[Path]:
+    """Return all existing snapshot directories, sorted newest first."""
+    snapshots_root = get_backup_dir() / "snapshots"
+    if not snapshots_root.is_dir():
+        return []
+    return sorted(
+        [p for p in snapshots_root.iterdir() if p.is_dir()],
+        reverse=True,
+    )

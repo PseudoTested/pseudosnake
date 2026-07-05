@@ -836,7 +836,13 @@ def test_analyze_command_integration(tmp_path, monkeypatch):
     test_file = test_dir / "test_mod.py"
     test_file.write_text("def test_f():\n    assert True\n")
 
+    snap_dir = tmp_path / ".pseudosnake_snap"
     monkeypatch.setattr(main, "find_test_files", lambda pd: [test_file])
+    monkeypatch.setattr(
+        main, "create_snapshot", lambda files, pd, sid: snap_dir.mkdir(exist_ok=True) or snap_dir
+    )
+    monkeypatch.setattr(main, "restore_snapshot", lambda sd, pd: 0)
+    monkeypatch.setattr(main, "cleanup_snapshot", lambda sd: None)
     monkeypatch.setattr(main, "run_tests_repeated", lambda *a, **kw: _ok_agg())
     monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: None)
     monkeypatch.setattr(

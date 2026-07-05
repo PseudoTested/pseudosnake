@@ -31,7 +31,15 @@ import typer
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from pseudosnake.backup import backup_file, cleanup_backup, restore_file
+from pseudosnake.backup import (
+    backup_file,
+    cleanup_backup,
+    cleanup_snapshot,
+    create_snapshot,
+    list_snapshots,
+    restore_file,
+    restore_snapshot,
+)
 from pseudosnake.helpers import (
     build_metadata,
     build_uncovered_entry,
@@ -67,11 +75,10 @@ from pseudosnake.runner import (
 )
 
 # cli application
-# create the typer app — no_args_is_help shows help when no args are given
 app = typer.Typer(
     name="pseudosnake",
     help="PseudoSnake identifies pseudo-tested statements and methods in Python packages.",
-    no_args_is_help=True,
+    no_args_is_help=False,
 )
 
 # rich console for coloured terminal output
@@ -503,18 +510,19 @@ def _print_mutant_result(func_name: str, mutant: str, status: str) -> None:
     console.print(f"  [{colour}]{status}[/] [dim]{func_name}[/] → {mutant}")
 
 
-# cli command
+# cli entry points
 
 
-@app.command()
-def analyze(
+@app.callback(invoke_without_command=True)
+def main(
+    ctx: typer.Context,
     project_dir: Path = typer.Option(
-        ...,
+        None,
         "--project-dir",
-        help="Root directory of the project to analyse.",
+        help="Root directory of the project.",
     ),
     test_command: str = typer.Option(
-        ...,
+        None,
         "--test-command",
         help="Command used to run the project's test suite (e.g. 'pytest tests/').",
     ),
@@ -545,6 +553,53 @@ def analyze(
         min=1,
         help="Timeout in seconds for each individual test-suite execution.",
     ),
+    reverting: bool = typer.Option(
+        False,
+        "--revert",
+        help="Revert PseudoSnake modifications left from a previous run.",
+    ),
+) -> None:
+    """Analyse a Python project for pseudo-tested functions."""
+    if reverting:
+        if project_dir is None:
+            console.print("[red]--project-dir is required with --revert.[/red]")
+            raise typer.Exit(1)
+        snapshots = list_snapshots()
+        if not snapshots:
+            console.print("[green]No snapshots found.[/green]")
+            raise typer.Exit()
+        console.print(
+            f"[bold]Found {len(snapshots)} snapshot(s)."
+            f" Restoring from latest...[/bold]"
+        )
+        latest = snapshots[0]
+        count = restore_snapshot(latest, project_dir)
+        console.print(
+            f"[green]{count} file(s) restored from snapshot"
+            f" {latest.name}.[/green]"
+        )
+        for snap in snapshots:
+            try:
+                cleanup_snapshot(snap)
+            except Exception:
+                pass
+        console.print("[green]Snapshots cleaned up.[/green]")
+        return
+
+    if project_dir is None or test_command is None:
+        console.print(ctx.get_help())
+        raise typer.Exit()
+    analyze(project_dir, test_command, file, source_dir, num_test_runs, output, test_timeout)
+
+
+def analyze(
+    project_dir: Path,
+    test_command: str,
+    file: Path | None = None,
+    source_dir: Path | None = None,
+    num_test_runs: int = 5,
+    output: Path | None = None,
+    test_timeout: int = 300,
 ) -> None:
     """Analyse a Python project for pseudo-tested functions."""
     # record the wall-clock start time for the report metadata
@@ -574,54 +629,67 @@ def analyze(
         f"[bold green]PseudoSnake[/] found [cyan]{len(files)}[/] file(s) to analyse."
     )
 
-    # phase 1: dynamic coverage
-    # coverage_map: {relative_file_path: {executed_function_key, ...}}
-    console.print("[bold]Running dynamic coverage phase...[/bold]")
-    coverage_map = _run_dynamic_coverage_phase(files, project_dir, test_command)
-    dynamically_executed_functions = sum(len(v) for v in coverage_map.values())
-    console.print(
-        f"[cyan]Coverage collected for "
-        f"{dynamically_executed_functions} function(s).[/cyan]"
+    # snapshot all source + test files so they can be restored on crash
+    test_files_snapshot = find_test_files(project_dir)
+    snapshot_id = f"run_{start_time.strftime('%Y%m%d_%H%M%S')}"
+    snapshot_dir = create_snapshot(
+        files + test_files_snapshot, project_dir, snapshot_id
     )
 
-    # phase 2: mutation testing
-    file_entries: list[dict[str, Any]] = []
-    # progress bar with a spinner while mutants are running
-    with Progress(
-        SpinnerColumn(), TextColumn("{task.description}"), console=console
-    ) as progress:
-        for file_path in files:
-            # look up which functions in this file were covered (if any)
-            exe_keys = coverage_map.get(str(file_path.relative_to(project_dir)))
-            # analyse the file — uncovered functions will be skipped
-            entry = _process_file(
-                file_path,
-                project_dir,
-                test_command,
-                num_test_runs,
-                progress,
-                exe_keys,
-                timeout=test_timeout,
-            )
-            if entry is not None:
-                file_entries.append(entry)
+    try:
+        # phase 1: dynamic coverage
+        # coverage_map: {relative_file_path: {executed_function_key, ...}}
+        console.print("[bold]Running dynamic coverage phase...[/bold]")
+        coverage_map = _run_dynamic_coverage_phase(files, project_dir, test_command)
+        dynamically_executed_functions = sum(len(v) for v in coverage_map.values())
+        console.print(
+            f"[cyan]Coverage collected for "
+            f"{dynamically_executed_functions} function(s).[/cyan]"
+        )
 
-    # phase 3: report
-    end_time = datetime.now(timezone.utc)
-    # assemble the metadata section
-    metadata = build_metadata(
-        start_time,
-        end_time,
-        project_dir,
-        source_dir,
-        file,
-        resolved_output,
-        test_command,
-        num_test_runs,
-        dynamically_executed_functions,
-        len(files),
-    )
-    # build and write the final json report
-    report = build_report(metadata, file_entries)
-    output_report(report, resolved_output)
-    console.print(f"\n[green]Report written to[/] [cyan]{resolved_output}[/]")
+        # phase 2: mutation testing
+        file_entries: list[dict[str, Any]] = []
+        # progress bar with a spinner while mutants are running
+        with Progress(
+            SpinnerColumn(), TextColumn("{task.description}"), console=console
+        ) as progress:
+            for file_path in files:
+                # look up which functions in this file were covered (if any)
+                exe_keys = coverage_map.get(
+                    str(file_path.relative_to(project_dir))
+                )
+                # analyse the file — uncovered functions will be skipped
+                entry = _process_file(
+                    file_path,
+                    project_dir,
+                    test_command,
+                    num_test_runs,
+                    progress,
+                    exe_keys,
+                    timeout=test_timeout,
+                )
+                if entry is not None:
+                    file_entries.append(entry)
+
+        # phase 3: report
+        end_time = datetime.now(timezone.utc)
+        # assemble the metadata section
+        metadata = build_metadata(
+            start_time,
+            end_time,
+            project_dir,
+            source_dir,
+            file,
+            resolved_output,
+            test_command,
+            num_test_runs,
+            dynamically_executed_functions,
+            len(files),
+        )
+        # build and write the final json report
+        report = build_report(metadata, file_entries)
+        output_report(report, resolved_output)
+        console.print(f"\n[green]Report written to[/] [cyan]{resolved_output}[/]")
+    finally:
+        restore_snapshot(snapshot_dir, project_dir)
+        cleanup_snapshot(snapshot_dir)
