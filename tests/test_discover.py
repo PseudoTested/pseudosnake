@@ -406,5 +406,5 @@ def test_find_all_python_files_excludes_venv(tmp_path: Path) -> None:
     (venv / "pkg.py").write_text("x")
 
     result = find_all_python_files(tmp_path)
-    paths = {str(p.relative_to(tmp_path)) for p in result}
+    paths = {p.relative_to(tmp_path).as_posix() for p in result}
     assert paths == {"mod.py", "tests/test_mod.py"}
