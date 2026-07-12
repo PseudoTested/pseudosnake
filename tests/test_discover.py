@@ -8,6 +8,7 @@ from pathlib import Path
 from pseudosnake.discover import (
     _extract_return_type,
     _resolve_source_root,
+    find_all_python_files,
     find_functions,
     find_python_files,
     find_test_files,
@@ -392,3 +393,18 @@ def decorated_func() -> None:
 
     names = [f.name for f in functions]
     assert "decorated_func" in names
+
+
+def test_find_all_python_files_excludes_venv(tmp_path: Path) -> None:
+    """find_all_python_files returns .py files excluding venv/caches."""
+    (tmp_path / "mod.py").write_text("x")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_mod.py").write_text("x")
+    (tmp_path / "not_py.txt").write_text("x")
+    venv = tmp_path / ".venv"
+    venv.mkdir()
+    (venv / "pkg.py").write_text("x")
+
+    result = find_all_python_files(tmp_path)
+    paths = {str(p.relative_to(tmp_path)) for p in result}
+    assert paths == {"mod.py", "tests/test_mod.py"}

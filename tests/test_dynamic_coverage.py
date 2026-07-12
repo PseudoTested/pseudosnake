@@ -319,7 +319,7 @@ def test_collect_executed_function_keys_missing_file_in_coverage(
         return_type="int",
     )
 
-    coverage_results = {}
+    coverage_results: dict[str, int] = {}
 
     result = collect_executed_function_keys(
         source_file, tmp_path, [func], coverage_results

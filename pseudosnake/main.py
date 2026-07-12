@@ -510,7 +510,7 @@ def _print_mutant_result(func_name: str, mutant: str, status: str) -> None:
     console.print(f"  [{colour}]{status}[/] [dim]{func_name}[/] → {mutant}")
 
 
-# cli entry points
+# cli commands
 
 
 @app.callback(invoke_without_command=True)
@@ -519,7 +519,7 @@ def main(
     project_dir: Path = typer.Option(
         None,
         "--project-dir",
-        help="Root directory of the project.",
+        help="Root directory of the project to analyse.",
     ),
     test_command: str = typer.Option(
         None,
@@ -564,19 +564,17 @@ def main(
         if project_dir is None:
             console.print("[red]--project-dir is required with --revert.[/red]")
             raise typer.Exit(1)
-        snapshots = list_snapshots()
+        snapshots = list_snapshots(project_dir)
         if not snapshots:
             console.print("[green]No snapshots found.[/green]")
             raise typer.Exit()
         console.print(
-            f"[bold]Found {len(snapshots)} snapshot(s)."
-            f" Restoring from latest...[/bold]"
+            f"[bold]Found {len(snapshots)} snapshot(s). Restoring from latest...[/bold]"
         )
         latest = snapshots[0]
         count = restore_snapshot(latest, project_dir)
         console.print(
-            f"[green]{count} file(s) restored from snapshot"
-            f" {latest.name}.[/green]"
+            f"[green]{count} file(s) restored from snapshot {latest.name}.[/green]"
         )
         for snap in snapshots:
             try:
@@ -589,7 +587,9 @@ def main(
     if project_dir is None or test_command is None:
         console.print(ctx.get_help())
         raise typer.Exit()
-    analyze(project_dir, test_command, file, source_dir, num_test_runs, output, test_timeout)
+    analyze(
+        project_dir, test_command, file, source_dir, num_test_runs, output, test_timeout
+    )
 
 
 def analyze(
@@ -604,6 +604,22 @@ def analyze(
     """Analyse a Python project for pseudo-tested functions."""
     # record the wall-clock start time for the report metadata
     start_time = datetime.now(timezone.utc)
+
+    # file discovery — find all source + test files the tool will modify
+    files = find_python_files(project_dir, file, source_dir)
+    test_files = find_test_files(project_dir)
+    console.print(
+        f"[bold green]PseudoSnake[/] found [cyan]{len(files)}[/] source + "
+        f"[cyan]{len(test_files)}[/] test file(s) to analyse."
+    )
+
+    # snapshot only source + test files — these are the only files the tool
+    # modifies, so these are the only files that need a restore point
+    snapshot_id = f"run_{start_time.strftime('%Y%m%d_%H%M%S')}"
+    snapshot_dir = create_snapshot(files + test_files, project_dir, snapshot_id)
+    console.print(
+        f"[dim]Snapshot saved — {len(files) + len(test_files)} file(s).[/dim]"
+    )
 
     # default output path
     # if no --output flag was given, write to <project-dir>/output/output.json
@@ -621,20 +637,6 @@ def analyze(
     )
     _validate_baseline(test_command, project_dir, num_test_runs, timeout=test_timeout)
     console.print("[bold green]Baseline passed.[/bold green]")
-
-    # file discovery
-    # find all python source files in the project (skipping tests)
-    files = find_python_files(project_dir, file, source_dir)
-    console.print(
-        f"[bold green]PseudoSnake[/] found [cyan]{len(files)}[/] file(s) to analyse."
-    )
-
-    # snapshot all source + test files so they can be restored on crash
-    test_files_snapshot = find_test_files(project_dir)
-    snapshot_id = f"run_{start_time.strftime('%Y%m%d_%H%M%S')}"
-    snapshot_dir = create_snapshot(
-        files + test_files_snapshot, project_dir, snapshot_id
-    )
 
     try:
         # phase 1: dynamic coverage
@@ -655,9 +657,7 @@ def analyze(
         ) as progress:
             for file_path in files:
                 # look up which functions in this file were covered (if any)
-                exe_keys = coverage_map.get(
-                    str(file_path.relative_to(project_dir))
-                )
+                exe_keys = coverage_map.get(str(file_path.relative_to(project_dir)))
                 # analyse the file — uncovered functions will be skipped
                 entry = _process_file(
                     file_path,
@@ -692,4 +692,3 @@ def analyze(
         console.print(f"\n[green]Report written to[/] [cyan]{resolved_output}[/]")
     finally:
         restore_snapshot(snapshot_dir, project_dir)
-        cleanup_snapshot(snapshot_dir)

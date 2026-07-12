@@ -6,6 +6,7 @@ file is copied to a platform-appropriate data directory (managed by
 ``platformdirs``).  Afterwards the backup is restored and cleaned up.
 """
 
+import hashlib
 import shutil
 import uuid
 from pathlib import Path
@@ -51,20 +52,24 @@ def cleanup_backup(backup_path: Path) -> None:
     backup_path.unlink(missing_ok=True)
 
 
-def get_snapshot_dir(snapshot_id: str) -> Path:
-    """Return the platform-appropriate path for a snapshot with given ID."""
-    return get_backup_dir() / "snapshots" / snapshot_id
+def _project_key(project_dir: Path) -> str:
+    """Return a short stable identifier for *project_dir*."""
+    resolved = str(project_dir.resolve())
+    return hashlib.sha256(resolved.encode()).hexdigest()[:12]
 
 
-def create_snapshot(
-    files: list[Path], project_dir: Path, snapshot_id: str
-) -> Path:
+def get_snapshot_dir(project_dir: Path, snapshot_id: str) -> Path:
+    """Return the platform-appropriate path for a snapshot scoped to *project_dir*."""
+    return get_backup_dir() / "snapshots" / _project_key(project_dir) / snapshot_id
+
+
+def create_snapshot(files: list[Path], project_dir: Path, snapshot_id: str) -> Path:
     """Snapshot *files* (relative to *project_dir*) into a run-specific directory.
 
     Each file is copied into the snapshot directory, preserving its relative
     path from *project_dir*.  Returns the path to the snapshot directory.
     """
-    snapshot_dir = get_snapshot_dir(snapshot_id)
+    snapshot_dir = get_snapshot_dir(project_dir, snapshot_id)
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     for file_path in files:
         relative = file_path.relative_to(project_dir)
@@ -94,12 +99,12 @@ def cleanup_snapshot(snapshot_dir: Path) -> None:
     shutil.rmtree(snapshot_dir, ignore_errors=True)
 
 
-def list_snapshots() -> list[Path]:
-    """Return all existing snapshot directories, sorted newest first."""
-    snapshots_root = get_backup_dir() / "snapshots"
-    if not snapshots_root.is_dir():
+def list_snapshots(project_dir: Path) -> list[Path]:
+    """Return all snapshot directories for *project_dir*, sorted newest first."""
+    project_root = get_snapshot_dir(project_dir, "")
+    if not project_root.is_dir():
         return []
     return sorted(
-        [p for p in snapshots_root.iterdir() if p.is_dir()],
+        [p for p in project_root.iterdir() if p.is_dir()],
         reverse=True,
     )

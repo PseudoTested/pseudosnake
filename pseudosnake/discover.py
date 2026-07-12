@@ -86,6 +86,11 @@ def find_test_files(project_dir: Path) -> list[Path]:
     return test_files
 
 
+def find_all_python_files(project_dir: Path) -> list[Path]:
+    """Return every ``.py`` file under *project_dir*, excluding venv/caches."""
+    return [p for p in sorted(project_dir.rglob("*.py")) if not _in_excluded_dir(p)]
+
+
 def find_python_files(
     project_dir: Path,
     single_file: Path | None = None,

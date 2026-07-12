@@ -71,26 +71,19 @@ def test_cleanup_backup_idempotent() -> None:
     cleanup_backup(path)
 
 
-def test_create_snapshot_preserves_relative_paths(tmp_path: Path) -> None:
-    """create_snapshot copies files preserving directory structure."""
+def test_create_snapshot_source_and_test_only(tmp_path: Path) -> None:
+    """create_snapshot only backs up the files given — no extra files."""
     project = tmp_path / "project"
     src = project / "src"
     src.mkdir(parents=True)
     (src / "mod.py").write_text("hello")
-    (src / "sub").mkdir()
-    (src / "sub" / "util.py").write_text("world")
+    (project / "README.md").write_text("# docs")
 
-    snap_dir = create_snapshot(
-        [src / "mod.py", src / "sub" / "util.py"],
-        project,
-        "run_test",
-    )
-    assert snap_dir.is_dir()
+    snap_dir = create_snapshot([src / "mod.py"], project, "run_test")
     assert (snap_dir / "src" / "mod.py").read_text() == "hello"
-    assert (snap_dir / "src" / "sub" / "util.py").read_text() == "world"
+    assert not (snap_dir / "README.md").exists()
 
     cleanup_snapshot(snap_dir)
-    assert not snap_dir.exists()
 
 
 def test_restore_snapshot_overwrites_files(tmp_path: Path) -> None:
@@ -123,25 +116,33 @@ def test_cleanup_snapshot_removes_directory(tmp_path: Path) -> None:
     assert not snap_dir.exists()
 
 
-def test_list_snapshots_empty() -> None:
-    """list_snapshots returns empty list when no snapshots exist (may have
-    prior snapshots from other tests, so we just check return type)."""
-    result = list_snapshots()
+def test_list_snapshots_empty(tmp_path: Path) -> None:
+    """list_snapshots returns empty list when no snapshots exist."""
+    result = list_snapshots(tmp_path)
     assert isinstance(result, list)
 
 
 def test_revert_roundtrip_full(tmp_path: Path) -> None:
-    """End-to-end: create snapshot → restore → verify matching content."""
+    """End-to-end: snapshot source+test files → corrupt → restore → verify."""
     project = tmp_path / "project"
     (project / "src").mkdir(parents=True)
     (project / "src" / "mod.py").write_text("import os\ndef f():\n    return 1\n")
+    tests = project / "tests"
+    tests.mkdir()
+    (tests / "test_mod.py").write_text("def test_f():\n    assert True\n")
 
     snap_dir = create_snapshot(
-        [project / "src" / "mod.py"], project, "run_test"
+        [project / "src" / "mod.py", tests / "test_mod.py"],
+        project,
+        "run_test",
     )
 
-    (project / "src" / "mod.py").write_text("corrupted content")
+    (project / "src" / "mod.py").write_text("corrupted")
+    (tests / "test_mod.py").write_text("corrupted")
     restore_snapshot(snap_dir, project)
-    assert (project / "src" / "mod.py").read_text() == "import os\ndef f():\n    return 1\n"
+    assert (
+        project / "src" / "mod.py"
+    ).read_text() == "import os\ndef f():\n    return 1\n"
+    assert (tests / "test_mod.py").read_text() == "def test_f():\n    assert True\n"
 
     cleanup_snapshot(snap_dir)

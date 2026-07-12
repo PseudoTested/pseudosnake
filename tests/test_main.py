@@ -446,6 +446,7 @@ def test_process_file_skips_uncovered(tmp_path, monkeypatch):
     entry = main._process_file(
         src, tmp_path, "pytest", 1, MagicMock(), executed_function_keys={"f"}
     )
+    assert entry is not None
     funcs = entry["functions"]
     covered = next(f for f in funcs if f["function_name"] == "f")
     uncovered = next(f for f in funcs if f["function_name"] == "g")
@@ -839,7 +840,9 @@ def test_analyze_command_integration(tmp_path, monkeypatch):
     snap_dir = tmp_path / ".pseudosnake_snap"
     monkeypatch.setattr(main, "find_test_files", lambda pd: [test_file])
     monkeypatch.setattr(
-        main, "create_snapshot", lambda files, pd, sid: snap_dir.mkdir(exist_ok=True) or snap_dir
+        main,
+        "create_snapshot",
+        lambda files, pd, sid: snap_dir.mkdir(exist_ok=True) or snap_dir,
     )
     monkeypatch.setattr(main, "restore_snapshot", lambda sd, pd: 0)
     monkeypatch.setattr(main, "cleanup_snapshot", lambda sd: None)
