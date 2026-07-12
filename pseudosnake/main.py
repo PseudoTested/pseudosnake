@@ -36,6 +36,8 @@ from pseudosnake.backup import (
     cleanup_backup,
     cleanup_snapshot,
     create_snapshot,
+    get_snapshot_dir,
+    get_snapshot_storage_info,
     list_snapshots,
     restore_file,
     restore_snapshot,
@@ -510,6 +512,26 @@ def _print_mutant_result(func_name: str, mutant: str, status: str) -> None:
     console.print(f"  [{colour}]{status}[/] [dim]{func_name}[/] → {mutant}")
 
 
+def _print_snapshot_info(project_dir: Path) -> None:
+    """Print snapshot storage details for *project_dir*."""
+    total_bytes, count = get_snapshot_storage_info(project_dir)
+    snapshots_root = get_snapshot_dir(project_dir, "")
+    console.print(f"\n[dim]Snapshot storage: {snapshots_root}[/dim]")
+    console.print(f"[dim]{_format_bytes(total_bytes)} across {count} run(s)[/dim]")
+    if count > 1:
+        console.print("[dim]Run --revert to restore and clean up old snapshots.[/dim]")
+    console.print()
+
+
+def _format_bytes(n: int) -> str:
+    """Return a human-friendly size string."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.0f} MB"
+    if n >= 1_000:
+        return f"{n / 1_000:.0f} KB"
+    return f"{n} B"
+
+
 # cli commands
 
 
@@ -558,6 +580,12 @@ def main(
         "--revert",
         help="Revert PseudoSnake modifications left from a previous run.",
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Show snapshot storage details.",
+    ),
 ) -> None:
     """Analyse a Python project for pseudo-tested functions."""
     if reverting:
@@ -568,6 +596,8 @@ def main(
         if not snapshots:
             console.print("[green]No snapshots found.[/green]")
             raise typer.Exit()
+        if verbose:
+            _print_snapshot_info(project_dir)
         console.print(
             f"[bold]Found {len(snapshots)} snapshot(s). Restoring from latest...[/bold]"
         )
@@ -588,7 +618,14 @@ def main(
         console.print(ctx.get_help())
         raise typer.Exit()
     analyze(
-        project_dir, test_command, file, source_dir, num_test_runs, output, test_timeout
+        project_dir,
+        test_command,
+        file,
+        source_dir,
+        num_test_runs,
+        output,
+        test_timeout,
+        verbose=verbose,
     )
 
 
@@ -600,6 +637,7 @@ def analyze(
     num_test_runs: int = 5,
     output: Path | None = None,
     test_timeout: int = 300,
+    verbose: bool = False,
 ) -> None:
     """Analyse a Python project for pseudo-tested functions."""
     # record the wall-clock start time for the report metadata
@@ -620,6 +658,8 @@ def analyze(
     console.print(
         f"[dim]Snapshot saved — {len(files) + len(test_files)} file(s).[/dim]"
     )
+    if verbose:
+        _print_snapshot_info(project_dir)
 
     # default output path
     # if no --output flag was given, write to <project-dir>/output/output.json

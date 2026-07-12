@@ -108,3 +108,19 @@ def list_snapshots(project_dir: Path) -> list[Path]:
         [p for p in project_root.iterdir() if p.is_dir()],
         reverse=True,
     )
+
+
+def get_snapshot_storage_info(project_dir: Path) -> tuple[int, int]:
+    """Return total bytes and snapshot count for *project_dir*."""
+    project_root = get_snapshot_dir(project_dir, "")
+    if not project_root.is_dir():
+        return 0, 0
+    total_bytes = 0
+    count = 0
+    for snap_dir in project_root.iterdir():
+        if snap_dir.is_dir():
+            count += 1
+            for f in snap_dir.rglob("*"):
+                if f.is_file():
+                    total_bytes += f.stat().st_size
+    return total_bytes, count
