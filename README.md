@@ -44,6 +44,27 @@ uv sync --dev
 uv run pseudosnake --help
 ```
 
+### Testing on a Local Project
+
+To test your local changes on another project, install pseudosnake in **editable** mode as a `uv` tool:
+
+```bash
+uv tool uninstall pseudosnake
+uv tool install -e .
+```
+
+Then run it from the target project directory:
+
+```bash
+pseudosnake --project-dir . \
+            --source-dir <package-name> \
+            --test-command "pytest" \
+            --num-test-runs 1
+```
+
+> **Note:** `--source-dir` should be the **package directory name** (e.g., `gator` for a project whose source lives in `gator/`), not necessarily `src`.
+> **Important:** Before running PseudoSnake, first verify that the target project's test suite runs successfully on its own. If the tests fail independently, PseudoSnake will report a baseline error.
+
 ## Running Tasks
 
 ```bash

@@ -640,6 +640,8 @@ def analyze(
     verbose: bool = False,
 ) -> None:
     """Analyse a Python project for pseudo-tested functions."""
+    project_dir = project_dir.resolve()
+
     # record the wall-clock start time for the report metadata
     start_time = datetime.now(timezone.utc)
 

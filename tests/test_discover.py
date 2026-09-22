@@ -277,6 +277,24 @@ def test_resolve_source_root_package_like(tmp_path: Path) -> None:
     assert _resolve_source_root(tmp_path, None) == pkg
 
 
+def test_resolve_source_root_package_like_with_dot_path(tmp_path: Path) -> None:
+    """_resolve_source_root handles Path('.') as project_dir."""
+    import os
+
+    pkg = tmp_path / tmp_path.name
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+
+    original_cwd = os.getcwd()
+    try:
+        os.chdir(tmp_path)
+        result = _resolve_source_root(Path("."), None)
+        assert result.name == tmp_path.name
+        assert (result / "__init__.py").exists()
+    finally:
+        os.chdir(original_cwd)
+
+
 def test_resolve_source_root_fallback(tmp_path: Path) -> None:
     """_resolve_source_root falls back to project_dir when nothing matches."""
     result = _resolve_source_root(tmp_path, None)

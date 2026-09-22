@@ -131,7 +131,7 @@ def _resolve_source_root(project_dir: Path, source_dir: Path | None) -> Path:
         return src_root
 
     # package-directory layout: project/<name>/ (has __init__.py)
-    package_like = project_dir / project_dir.name
+    package_like = project_dir / project_dir.resolve().name
     if package_like.is_dir() and (package_like / "__init__.py").exists():
         return package_like
 
