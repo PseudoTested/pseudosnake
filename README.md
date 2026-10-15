@@ -49,7 +49,6 @@ uv run pseudosnake --help
 To test your local changes on another project, install pseudosnake in **editable** mode as a `uv` tool:
 
 ```bash
-uv tool uninstall pseudosnake
 uv tool install -e .
 ```
 
@@ -89,7 +88,3 @@ uv run task cosmic-ray-baseline
 uv run task cosmic-ray-exec
 uv run task cosmic-ray-report
 ```
-
-## License
-
-MIT
