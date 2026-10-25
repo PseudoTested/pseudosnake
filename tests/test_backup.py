@@ -29,6 +29,8 @@ def test_backup_file_creates_copy() -> None:
         tf.write("original content")
         file_path = Path(tf.name)
 
+    # Keep cleanup safe if backup_file raises before assigning a path.
+    backup_path: Path | None = None
     try:
         backup_path = backup_file(file_path)
         assert backup_path.exists()
@@ -36,7 +38,8 @@ def test_backup_file_creates_copy() -> None:
         assert backup_path != file_path
     finally:
         file_path.unlink(missing_ok=True)
-        cleanup_backup(backup_path)
+        if backup_path is not None:
+            cleanup_backup(backup_path)
 
 
 def test_restore_file_overwrites_with_backup(tmp_path: Path) -> None:
