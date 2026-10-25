@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from pseudosnake.discover import FunctionInfo
+from pseudosnake.dynamic_coverage import FunctionCoverage
 from pseudosnake.runner import RunResult, extract_failed_tests, extract_pytest_counts
 
 
@@ -47,6 +48,12 @@ def build_mutant_entry(
         entry["verification"] = (
             verification  # sha256 hashes proving mutation was applied
         )
+    # preserve infrastructure diagnostics for outcomes that do not represent
+    # a normal passing or failing test assertion.
+    if status in {"ERROR", "INVALID", "CRASH"}:
+        diagnostic = test_result.stderr.strip() or test_result.stdout.strip()
+        if diagnostic:
+            entry["error"] = diagnostic
     return entry
 
 
@@ -57,8 +64,13 @@ def build_function_entry(
     func_info: FunctionInfo,
     mutant_entries: list[dict[str, Any]],
     covered: bool = True,
+    coverage: FunctionCoverage | None = None,
 ) -> dict[str, Any]:
     """Build the dict representing one function and all its mutant results."""
+    # A detailed record is the source of truth when dynamic coverage ran.
+    # This prevents the summary boolean and call counts from disagreeing.
+    if coverage is not None:
+        covered = coverage.covered
     entry: dict[str, Any] = {
         "function_name": func_info.name,
         "line_number": func_info.line_number,
@@ -69,6 +81,10 @@ def build_function_entry(
     # only include class_name for methods (not top-level functions)
     if func_info.class_name is not None:
         entry["class_name"] = func_info.class_name
+    # Keep the existing boolean for report compatibility while exposing the
+    # detailed call attribution collected during dynamic coverage.
+    if coverage is not None:
+        entry["coverage"] = coverage.to_report_dict()
     return entry
 
 
@@ -95,10 +111,20 @@ def compute_mutation_score(
 
     Mutation score = killed / (killed + survived), i.e. the fraction of
     testable mutants that were actually caught by the test suite.
-    NO_TESTS and CRASH mutants are tracked but excluded from the denominator.
+    NO_TESTS, CRASH, ERROR, and INVALID mutants are tracked but excluded from
+    the denominator.
     Returns a dict with per-status counts and the computed score.
     """
-    counts = {"KILLED": 0, "SURVIVED": 0, "NO_TESTS": 0, "CRASH": 0}
+    # track non-testable outcomes separately so they remain visible without
+    # inflating or reducing the killed-versus-survived mutation score.
+    counts = {
+        "KILLED": 0,
+        "SURVIVED": 0,
+        "NO_TESTS": 0,
+        "CRASH": 0,
+        "ERROR": 0,
+        "INVALID": 0,
+    }
     for file_entry in file_entries:
         for func_entry in file_entry.get("functions", []):
             for mutant_entry in func_entry.get("mutants", []):
