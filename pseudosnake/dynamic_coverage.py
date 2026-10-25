@@ -1,45 +1,60 @@
-"""Experimental dynamic function-coverage instrumentation.
+"""Dynamic function-coverage instrumentation.
 
-How it works
-------------
-1. **Header block** — injected into every instrumented file (source and test).
-   Sets up a shared ``__ps_ctx__`` list (stored on Python's ``builtins`` module
-   so every file sees the same list) and a per-file ``__pseudosnake_cov__``
-   counter dict.
-
-2. **Test instrumentation** — a one-line marker ``__ps_ctx__[0] = "test_name"``
-   is inserted at the top of every test function body.  This tells the shared
-   context *which test is currently executing*.
-
-3. **Source instrumentation** — a three-line counter is inserted at the top
-   of every source function body.  It reads ``__ps_ctx__[0]``, builds a key
-   like ``"test_x\\x00func_y"``, and increments that key in the per-file dict.
-
-4. **Flush (atexit)** — after the test suite finishes, every file's
-   ``__pseudosnake_flush_cov__`` function merges its raw counters into a
-   shared JSON file, splitting each key on ``\\x00`` to build a nested
-   ``{func: {total: n, by_test: {test: n}}}`` structure.
-
-Why ``builtins``?
------------------
-Each Python source file is a separate module with its own global scope.
-``__ps_ctx__ = [None]`` in file A is a *different list* from the same line
-in file B.  Storing the context on ``builtins._pseudosnake_ctx`` guarantees
-that **every** instrumented module references the same singleton list object.
+The standard AST identifies source and test function bodies, then targeted
+text edits add lightweight counters and test markers. A process-wide bootstrap
+shares the active test name with source modules and writes both total hits and
+per-test hits at normal interpreter shutdown.
 """
 
 from __future__ import annotations
 
+import ast
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from pseudosnake.discover import FunctionInfo
+from pseudosnake.source_edit import (
+    apply_text_edits,
+    locate_function_nodes,
+    prepend_function_statement,
+)
 
 
 # marker string injected into every instrumented file — used as an
 # idempotency guard so re-instrumenting an already-instrumented file
 # is a no-op
 _INSTRUMENTATION_MARKER = "# PseudoSnake experimental dynamic coverage instrumentation"
+
+
+@dataclass
+class FunctionCoverage:
+    """Normalized call counts for one discovered source function."""
+
+    total_calls: int = 0
+    by_test: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def covered(self) -> bool:
+        """Return whether the function ran at least once."""
+        return self.total_calls > 0
+
+    def to_report_dict(self) -> dict[str, Any]:
+        """Return the stable JSON shape exposed in the final report."""
+        attributed_calls = sum(self.by_test.values())
+        return {
+            "total_calls": self.total_calls,
+            "attributed_calls": attributed_calls,
+            # Calls made outside a marked test remain visible instead of being
+            # incorrectly assigned to whichever test happened to run nearby.
+            "unattributed_calls": max(self.total_calls - attributed_calls, 0),
+            "by_test": dict(sorted(self.by_test.items())),
+        }
+
+
+# One normalized coverage record per stable function key, grouped by file.
+CoverageMap = dict[str, dict[str, FunctionCoverage]]
 
 
 def is_already_instrumented(source: str) -> bool:
@@ -53,17 +68,19 @@ def is_already_instrumented(source: str) -> bool:
 def function_key(func_info: FunctionInfo) -> str:
     """Return a stable function identifier for coverage records.
 
-    Uses function name (and optional class name) — **not** line number, since
-    line numbers shift after instrumentation injection.
+    The original definition line distinguishes overloads and repeated names.
+    Instrumentation records keys before adding its module-level bootstrap, so
+    this position remains stable for the duration of a coverage run.
     """
     # top-level functions are identified by just their name
     if func_info.class_name is None:
-        return func_info.name
-    # methods include the class name: "MyClass.my_method"
-    return f"{func_info.class_name}.{func_info.name}"
-
-
-# source-file instrumentation
+        qualified_name = func_info.name
+    else:
+        # class qualification prevents a method from colliding with a
+        # top-level function that has the same name.
+        qualified_name = f"{func_info.class_name}.{func_info.name}"
+    # the original def line separates repeated definitions in the same scope.
+    return f"{qualified_name}@{func_info.line_number}"
 
 
 def instrument_file_source(
@@ -71,176 +88,185 @@ def instrument_file_source(
     functions: list[FunctionInfo],
     file_label: str,
 ) -> str:
-    """Return *source* with lightweight runtime counters injected.
-
-    For each function a three-line tracking snippet is inserted at the top of
-    its body.  A shared header block is inserted after the module docstring.
-    """
-    # nothing to instrument — return source unchanged
-    if not functions:
+    """Return *source* with syntax-aware runtime counters injected."""
+    # do not edit files with no targets or files left instrumented by a
+    # previous interrupted run.
+    if not functions or _INSTRUMENTATION_MARKER in source:
         return source
 
-    # idempotency guard: if already instrumented, return unchanged
-    if _INSTRUMENTATION_MARKER in source:
-        return source
-
-    # split into lines, preserving trailing newlines
-    lines = source.splitlines(keepends=True)
-    instrumented = list(lines)
-
-    # insert counter stanzas — process in reverse line order so earlier
-    # insertions don't shift the line positions of later ones
-    for func in sorted(functions, key=lambda f: f.body_start_line, reverse=True):
-        indent = " " * func.body_col_offset  # match the function's indentation
-        key = function_key(func)
-        # three-line tracking snippet injected at the top of the function body.
-        # wrapped in try/except so import-time execution (e.g. decorators)
-        # doesn't poison coverage if the instrumentation context isn't ready:
-        #   try:
-        #       _t = __ps_ctx__[-1] if __ps_ctx__ else '_no_test_'
-        #       _k = _t + '\x00' + "func_name"
-        #       __pseudosnake_cov__[_k] = __pseudosnake_cov__.get(_k, 0) + 1
-        #   except Exception:
-        #       pass
-        counter_stanza = (
-            indent
-            + "try:\n"
-            + indent
-            + "    _t = __ps_ctx__[-1] if __ps_ctx__ else '_no_test_'\n"
-            + indent
-            + "    _k = _t + '\\x00' + "
-            + repr(key)
-            + "\n"
-            + indent
-            + "    __pseudosnake_cov__[_k] = __pseudosnake_cov__.get(_k, 0) + 1\n"
-            + indent
-            + "except Exception:\n"
-            + indent
-            + "    pass\n"
+    # resolve every FunctionInfo to its exact AST node before changing source
+    # offsets. Each returned TextEdit still points into the original source.
+    nodes = locate_function_nodes(source, functions)
+    edits = []
+    for function, node in zip(functions, nodes, strict=True):
+        key = function_key(function)
+        # Key each hit by the active test and source function. The bootstrap
+        # later turns these tuple keys into the nested ``by_test`` JSON shape.
+        counter_key = (
+            f"((__pseudosnake_test_context__[0], {key!r}) "
+            f"if __pseudosnake_test_context__[0] is not None else {key!r})"
         )
-        # insert before the first body statement (1-indexed → 0-indexed)
-        insert_at = func.body_start_line - 1
-        instrumented[insert_at:insert_at] = [counter_stanza]
+        # Keep the injected statement import-free and on one line because it
+        # runs on every call and may be inserted into a one-line function.
+        counter = (
+            f"__pseudosnake_cov__[{counter_key}] = "
+            f"__pseudosnake_cov__.get({counter_key}, 0) + 1"
+        )
+        edits.append(prepend_function_statement(source, node, counter))
 
-    # insert the module-level header (shared context + flush helper)
-    # after the docstring and future imports
-    header = _build_header_block(file_label)
-    insert_index = _find_module_insert_index(lines)
-    instrumented[insert_index:insert_index] = [header]
-    return "".join(instrumented)
-
-
-# test-file instrumentation
+    # apply all body edits together so one insertion cannot shift another
+    # function's AST-derived offsets.
+    instrumented = apply_text_edits(source, edits)
+    lines = instrumented.splitlines(keepends=True)
+    # Module setup belongs after the docstring and all __future__ imports.
+    lines.insert(_find_module_insert_index(lines), _build_header_block(file_label))
+    return "".join(lines)
 
 
 def instrument_test_file(
     source: str,
-    test_functions: list[FunctionInfo],
+    functions: list[FunctionInfo],
     file_label: str,
 ) -> str:
-    """Return *source* with ``__ps_ctx__.append("test_name")`` injected into tests.
+    """Return *source* with an active-test marker in each test function.
 
-    Each test function body starts with a line that pushes onto the shared
-    context stack which test is currently executing.  When a source function is
-    called from within that test, its counter will attribute the hit correctly.
+    Only functions whose names start with ``test`` are marked. Helpers and
+    fixtures in test modules must not replace the identity of the test that
+    called them.
     """
-    if not test_functions:
+    test_functions = [
+        function for function in functions if function.name.startswith("test")
+    ]
+    if not test_functions or _INSTRUMENTATION_MARKER in source:
         return source
 
-    # idempotency guard: if already instrumented, return unchanged
-    if _INSTRUMENTATION_MARKER in source:
-        return source
+    # Reuse the same AST resolver and targeted edit helper as source
+    # instrumentation so decorators, async tests, and formatting are kept.
+    nodes = locate_function_nodes(source, test_functions)
+    edits = []
+    for function, node in zip(test_functions, nodes, strict=True):
+        qualified_name = function.name
+        if function.class_name is not None:
+            qualified_name = f"{function.class_name}::{function.name}"
+        test_key = f"{file_label}::{qualified_name}"
+        marker = f"__pseudosnake_test_context__[0] = {test_key!r}"
+        edits.append(prepend_function_statement(source, node, marker))
 
-    lines = source.splitlines(keepends=True)
-    instrumented = list(lines)
-
-    # inject marker at top of each test function body (reverse order for safety)
-    for func in sorted(test_functions, key=lambda f: f.body_start_line, reverse=True):
-        indent = " " * func.body_col_offset
-        # push this test's name onto the shared context stack
-        marker = indent + "__ps_ctx__.append(" + repr(func.name) + ")\n"
-        insert_at = func.body_start_line - 1
-        instrumented[insert_at:insert_at] = [marker]
-
-    # also inject the shared header block (imports and atexit flush)
-    header = _build_header_block(file_label)
-    insert_index = _find_module_insert_index(lines)
-    instrumented[insert_index:insert_index] = [header]
-    return "".join(instrumented)
+    instrumented = apply_text_edits(source, edits)
+    lines = instrumented.splitlines(keepends=True)
+    lines.insert(_find_module_insert_index(lines), _build_test_header_block())
+    return "".join(lines)
 
 
 # header block (injected into every instrumented file)
 
 
 def _build_header_block(file_label: str) -> str:
-    """Build the module-level tracking infrastructure as a Python source string.
-
-    Injects:
-    * ``__ps_ctx__`` — alias to ``builtins._pseudosnake_ctx`` (shared list).
-    * ``__pseudosnake_cov__`` — per-file counter dict.
-    * ``__pseudosnake_flush_cov__()`` — atexit handler that merges counter
-      data into the shared JSON file, converting raw ``test\\x00func`` keys
-      into a nested ``{func: {total, by_test}}`` structure.
-    """
-    # fmt: off
+    """Build an import-free source counter registered with the bootstrap."""
     return (
         "\n# PseudoSnake experimental dynamic coverage instrumentation\n"
-        "import atexit as __pseudosnake_atexit__\n"
-        "import json as __pseudosnake_json__\n"
-        "import os as __pseudosnake_os__\n"
-        "import builtins as __ps_builtins__\n"
-        "\n"
-        # create a shared list on the builtins module — every file sees the
-        # same list object, so test files can write to it and source files
-        # can read from it
-        "if not hasattr(__ps_builtins__, '_pseudosnake_ctx'):\n"
-        "    __ps_builtins__._pseudosnake_ctx = []\n"
-        "__ps_ctx__ = __ps_builtins__._pseudosnake_ctx\n"
-        "\n"
-        # per-file counter dict: maps "test_name\x00func_name" -> hit count
+        "# Store this module's function hit counts locally.\n"
         "__pseudosnake_cov__ = {}\n"
-        "\n"
-        # atexit handler: merges this file's counters into the shared JSON
-        "def __pseudosnake_flush_cov__() -> None:\n"
-        "    path = __pseudosnake_os__.getenv('PSEUDOSNAKE_DYN_COV_PATH')\n"
-        "    if not path:\n"
-        "        return\n"
-        "    try:\n"
-        # load existing data if the JSON file already exists
-        "        data = {}\n"
-        "        if __pseudosnake_os__.path.exists(path):\n"
-        "            with open(path, 'r', encoding='utf-8') as infile:\n"
-        "                data = __pseudosnake_json__.load(infile)\n"
-        # get or create this file's slot in the data dict
-        "        file_data = data.setdefault(" + repr(file_label) + ", {})\n"
-        # merge each counter entry
-        "        for raw_key, count in __pseudosnake_cov__.items():\n"
-        # split "test_name\x00func_name" into (test_name, func_name)
-        "            parts = raw_key.split('\\x00', 1)\n"
-        "            test_name = parts[0]\n"
-        "            func_name = parts[1] if len(parts) > 1 else raw_key\n"
-        # ensure the function slot exists in the new nested format
-        "            if func_name not in file_data:\n"
-        "                file_data[func_name] = {'total': 0, 'by_test': {}}\n"
-        # handle legacy flat data (upgrade from int to nested dict)
-        "            elif not isinstance(file_data[func_name], dict):\n"
-        "                file_data[func_name] = {'total': file_data[func_name], 'by_test': {}}\n"
-        # accumulate the total hit count
-        "            file_data[func_name]['total'] = file_data[func_name].get('total', 0) + count\n"
-        # if we know which test called, record it in the by_test map
-        "            if test_name != '_no_test_':\n"
-        "                by_test = file_data[func_name].setdefault('by_test', {})\n"
-        "                by_test[test_name] = by_test.get(test_name, 0) + count\n"
-        # write the merged data back to the JSON file
-        "        with open(path, 'w', encoding='utf-8') as outfile:\n"
-        "            __pseudosnake_json__.dump(data, outfile, indent=2)\n"
-        "    except Exception:\n"
-        "        return\n"
-        "\n"
-        # register the flush handler to run on normal process exit
-        "__pseudosnake_atexit__.register(__pseudosnake_flush_cov__)\n\n"
+        "# Use a local fallback only if the process bootstrap is unavailable.\n"
+        "__pseudosnake_test_context__ = [None]\n"
+        "try:\n"
+        "    # sitecustomize exposes process-wide state via builtins.\n"
+        "    if isinstance(__builtins__, dict):\n"
+        "        __pseudosnake_register__ = __builtins__['_pseudosnake_register__']\n"
+        "        __pseudosnake_test_context__ = __builtins__.get(\n"
+        "            '_pseudosnake_test_context__', __pseudosnake_test_context__\n"
+        "        )\n"
+        "    else:\n"
+        "        __pseudosnake_register__ = __builtins__._pseudosnake_register__\n"
+        "        __pseudosnake_test_context__ = getattr(\n"
+        "            __builtins__, '_pseudosnake_test_context__',\n"
+        "            __pseudosnake_test_context__,\n"
+        "        )\n"
+        f"    __pseudosnake_register__({file_label!r}, __pseudosnake_cov__)\n"
+        "except Exception:\n"
+        "    pass\n\n"
     )
-    # fmt: on
+
+
+def _build_test_header_block() -> str:
+    """Build the shared-context alias used by instrumented test functions."""
+    return (
+        "\n# PseudoSnake experimental dynamic coverage instrumentation\n"
+        "# Use a local fallback only if the process bootstrap is unavailable.\n"
+        "__pseudosnake_test_context__ = [None]\n"
+        "try:\n"
+        "    if isinstance(__builtins__, dict):\n"
+        "        __pseudosnake_test_context__ = __builtins__.get(\n"
+        "            '_pseudosnake_test_context__', __pseudosnake_test_context__\n"
+        "        )\n"
+        "    else:\n"
+        "        __pseudosnake_test_context__ = getattr(\n"
+        "            __builtins__, '_pseudosnake_test_context__',\n"
+        "            __pseudosnake_test_context__,\n"
+        "        )\n"
+        "except Exception:\n"
+        "    pass\n\n"
+    )
+
+
+def build_coverage_bootstrap() -> str:
+    """Return ``sitecustomize`` code that owns process-wide coverage state."""
+    return """import atexit as __pseudosnake_atexit__
+import builtins as __pseudosnake_builtins__
+import json as __pseudosnake_json__
+import os as __pseudosnake_os__
+
+# Every imported source module registers its own live counter dictionary here.
+__pseudosnake_sources__ = {}
+# Test markers and source counters share this mutable one-item context.
+__pseudosnake_test_context__ = [None]
+
+def __pseudosnake_register__(file_name, counters):
+    __pseudosnake_sources__.setdefault(file_name, []).append(counters)
+
+# Instrumented modules can reach the registrar without adding imports.
+__pseudosnake_builtins__._pseudosnake_register__ = __pseudosnake_register__
+__pseudosnake_builtins__._pseudosnake_test_context__ = __pseudosnake_test_context__
+
+def __pseudosnake_flush_cov__():
+    path = __pseudosnake_os__.getenv("PSEUDOSNAKE_DYN_COV_PATH")
+    if not path:
+        return
+    try:
+        # Preserve results already flushed by another interpreter process.
+        data = {}
+        if __pseudosnake_os__.path.exists(path):
+            with open(path, "r", encoding="utf-8") as infile:
+                data = __pseudosnake_json__.load(infile)
+        for file_name, sources in __pseudosnake_sources__.items():
+            file_data = data.setdefault(file_name, {})
+            for counters in sources:
+                for raw_key, count in counters.items():
+                    # Current counters use ``(test_name, func_name)`` keys.
+                    # Accept plain keys too so the bootstrap remains tolerant
+                    # of counters registered without caller-aware tracking.
+                    if isinstance(raw_key, tuple) and len(raw_key) == 2:
+                        test_name, func_name = raw_key
+                    else:
+                        test_name, func_name = None, raw_key
+                    # Keep the legacy nested report shape for compatibility.
+                    current = file_data.get(func_name, {"total": 0, "by_test": {}})
+                    if not isinstance(current, dict):
+                        current = {"total": current, "by_test": {}}
+                    current["total"] = current.get("total", 0) + count
+                    if test_name is not None:
+                        by_test = current.setdefault("by_test", {})
+                        by_test[test_name] = by_test.get(test_name, 0) + count
+                    file_data[func_name] = current
+        with open(path, "w", encoding="utf-8") as outfile:
+            __pseudosnake_json__.dump(data, outfile, indent=2)
+    except Exception:
+        # Coverage is best-effort and must never make the user's tests fail.
+        return
+
+# Flush after tests and imported modules have finished executing.
+__pseudosnake_atexit__.register(__pseudosnake_flush_cov__)
+"""
 
 
 # safe insertion point
@@ -253,50 +279,43 @@ def _find_module_insert_index(lines: list[str]) -> int:
     with any of those module-level constructs.  Existing PseudoSnake
     instrumentation is also skipped to prevent duplication.
     """
-    idx = 0
+    source = "".join(lines)
+    try:
+        # AST locations handle multiline strings and future imports more
+        # reliably than scanning source text for quote characters.
+        tree = ast.parse(source)
+    except SyntaxError:
+        # Instrumentation will later fail compilation with a useful error; an
+        # end-of-file index keeps this helper safe for standalone callers.
+        return len(lines)
 
-    # skip shebang line: #!/usr/bin/env python
+    idx = 0
+    # shebang and encoding declarations must remain at the physical top.
     if lines and lines[0].startswith("#!"):
         idx = 1
-
-    # skip encoding declaration: # -*- coding: utf-8 -*-
     if idx < len(lines) and "coding" in lines[idx]:
         idx += 1
 
-    # skip module docstring (single-line or multi-line)
-    if idx < len(lines) and lines[idx].lstrip().startswith(('"""', "'''")):
-        quote = '"""' if '"""' in lines[idx] else "'''"
-        if lines[idx].count(quote) >= 2:
-            # single-line docstring: """summary."""
-            idx += 1
-        else:
-            # multi-line docstring: skip until closing quote
-            idx += 1
-            while idx < len(lines) and quote not in lines[idx]:
-                idx += 1
-            if idx < len(lines):
-                idx += 1  # skip the closing quote line
+    body_index = 0
+    # module docstring must remain the first executable AST statement.
+    if (
+        tree.body
+        and isinstance(tree.body[0], ast.Expr)
+        and isinstance(tree.body[0].value, ast.Constant)
+        and isinstance(tree.body[0].value.value, str)
+    ):
+        idx = max(idx, tree.body[0].end_lineno or tree.body[0].lineno)
+        body_index = 1
 
-    # skip from __future__ import lines (must be at top of file)
-    while idx < len(lines) and lines[idx].startswith("from __future__ import"):
-        idx += 1
-
-    # skip existing PseudoSnake instrumentation to prevent duplication
-    # the header block starts with "\n# PseudoSnake ..." so the marker may
-    # appear on lines[idx] (blank) + 1, or on lines[idx] directly if the
-    # source has no leading blank line between the header and prior content
-    marker_found = (idx < len(lines) and _INSTRUMENTATION_MARKER in lines[idx]) or (
-        idx + 1 < len(lines) and _INSTRUMENTATION_MARKER in lines[idx + 1]
-    )
-    if marker_found:
-        # skip past entire instrumentation block until the next blank line
-        # followed by non-blank content (the original source continues there)
-        while idx < len(lines):
-            line = lines[idx].rstrip("\n").rstrip("\r")
-            if line == "" and idx + 1 < len(lines) and lines[idx + 1].strip() != "":
-                idx += 1
-                break
-            idx += 1
+    # __future__ imports are only valid near the beginning of the module.
+    while body_index < len(tree.body):
+        statement = tree.body[body_index]
+        if not (
+            isinstance(statement, ast.ImportFrom) and statement.module == "__future__"
+        ):
+            break
+        idx = max(idx, statement.end_lineno or statement.lineno)
+        body_index += 1
 
     return idx
 
@@ -321,56 +340,67 @@ def load_dynamic_coverage_results(path: Path) -> dict:  # type: ignore[type-arg]
     return loaded if isinstance(loaded, dict) else {}
 
 
-def collect_executed_function_keys(
+def collect_function_coverage(
     file_path: Path,
     project_dir: Path,
     functions: list[FunctionInfo],
     coverage_results: dict,  # type: ignore[type-arg]
-) -> list[str]:
-    """Return function keys with ``total > 0`` for a specific source file.
+) -> dict[str, FunctionCoverage]:
+    """Return normalized coverage records for one source file.
 
     Handles both the **legacy flat format** (``{func: int}``) and the
     **new nested caller-aware format** (``{func: {total, by_test}}``).
+    Every discovered function receives a record, including functions with no
+    calls, so report generation never has to guess whether data is missing.
     """
     # look up this file's coverage data by relative path
     relative = str(file_path.relative_to(project_dir))
     file_data = coverage_results.get(relative, {})
-    executed: list[str] = []
+    if not isinstance(file_data, dict):
+        file_data = {}
+    coverage: dict[str, FunctionCoverage] = {}
 
     for func in functions:
         key = function_key(func)
-        value = file_data.get(key, 0)
+        # older reports used only the qualified name, so accept that key while
+        # reading existing coverage files created before line-aware identity.
+        legacy_key = key.rsplit("@", 1)[0]
+        value = file_data.get(key, file_data.get(legacy_key, 0))
         if isinstance(value, dict):
-            # new nested format: check the "total" field
-            if value.get("total", 0) > 0:
-                executed.append(key)
-        elif value > 0:
-            # legacy flat format: the value itself is the count
-            executed.append(key)
+            # Keep only valid positive per-test counters. Sorting happens when
+            # the record is serialized so output is deterministic.
+            raw_by_test = value.get("by_test", {})
+            by_test = (
+                {
+                    test_name: count
+                    for test_name, count in raw_by_test.items()
+                    if isinstance(test_name, str)
+                    and isinstance(count, int)
+                    and not isinstance(count, bool)
+                    and count > 0
+                }
+                if isinstance(raw_by_test, dict)
+                else {}
+            )
+            raw_total = value.get("total", 0)
+            total = (
+                raw_total
+                if isinstance(raw_total, int)
+                and not isinstance(raw_total, bool)
+                and raw_total > 0
+                else 0
+            )
+            # A per-test count is direct proof of execution even if an older or
+            # partially written record omitted the matching total.
+            total = max(total, sum(by_test.values()))
+        else:
+            # Legacy flat files contain only a total and cannot attribute it.
+            total = (
+                value
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0
+                else 0
+            )
+            by_test = {}
+        coverage[key] = FunctionCoverage(total_calls=total, by_test=by_test)
 
-    return executed
-
-
-def collect_test_to_function_map(
-    file_path: Path,
-    project_dir: Path,
-    coverage_results: dict,  # type: ignore[type-arg]
-) -> dict[str, set[str]]:
-    """Return ``{test_name: {func_key, ...}}`` for a source file.
-
-    Only populated when caller-aware instrumentation was used (nested format).
-    """
-    relative = str(file_path.relative_to(project_dir))
-    file_data = coverage_results.get(relative, {})
-    mapping: dict[str, set[str]] = {}
-
-    # iterate over every function entry in this file's coverage data
-    for func_key, value in file_data.items():
-        # only nested entries have a "by_test" sub-dict
-        if isinstance(value, dict) and "by_test" in value:
-            # for each test that called this function, add the function key
-            # to that test's set
-            for test_name in value["by_test"]:
-                mapping.setdefault(test_name, set()).add(func_key)
-
-    return mapping
+    return coverage
