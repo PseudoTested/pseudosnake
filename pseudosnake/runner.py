@@ -190,20 +190,34 @@ def classify_result(test_result: RunResult) -> str:
     ============ =============================================================
     Exit code    Label
     ============ =============================================================
+    ``-2``       ``INVALID`` — mutation could not produce valid Python.
     ``-1``       ``CRASH`` — subprocess failed to launch or timed out.
     ``0``        ``SURVIVED`` — all tests passed *despite* the mutation.
+    ``1``        ``KILLED`` — tests ran and at least one test failed.
+    ``2``, ``3``,
+    ``4``        ``ERROR`` — interrupted/internal/usage or collection failure.
     ``5``        ``NO_TESTS`` — pytest found no tests to collect.
-    other        ``KILLED`` — at least one test failed because of the mutation.
+    other        ``ERROR`` — unexpected test-run failure.
     ============ =============================================================
     """
     # check exit codes in priority order
+    # negative codes are PseudoSnake's internal sentinel values, not pytest
+    # process exit codes.
+    if test_result.exit_code == -2:
+        return "INVALID"
     if test_result.exit_code == -1:
         return "CRASH"
     if test_result.exit_code == 0:
         return "SURVIVED"
+    # pytest reserves exit code 1 for tests that ran and failed, which is the
+    # only non-zero outcome that proves the mutant was killed by a test.
+    if test_result.exit_code == 1:
+        return "KILLED"
     if test_result.exit_code == 5:
         return "NO_TESTS"
-    return "KILLED"
+    # collection, usage, interruption, and unknown failures are tool errors;
+    # counting them as killed mutants would overstate the mutation score.
+    return "ERROR"
 
 
 def extract_failed_tests(test_result: RunResult) -> list[str]:
