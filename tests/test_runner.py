@@ -23,9 +23,22 @@ def test_classify_result_survived() -> None:
 
 
 def test_classify_result_killed() -> None:
-    """classify_result returns KILLED when exit code is non-zero."""
+    """classify_result returns KILLED for pytest's test-failure exit code."""
     result = RunResult(exit_code=1, stdout="", stderr="FAILED", duration=0.1)
     assert classify_result(result) == "KILLED"
+
+
+def test_classify_result_errors() -> None:
+    """Collection, interruption, internal, and unknown failures are errors."""
+    for exit_code in (2, 3, 4, 17):
+        result = RunResult(exit_code=exit_code, stdout="", stderr="", duration=0.1)
+        assert classify_result(result) == "ERROR"
+
+
+def test_classify_result_invalid() -> None:
+    """An invalid generated mutation has its own status."""
+    result = RunResult(exit_code=-2, stdout="", stderr="", duration=0.0)
+    assert classify_result(result) == "INVALID"
 
 
 def test_classify_result_no_tests() -> None:
@@ -67,7 +80,7 @@ def test_run_tests_records_duration(tmp_path: Path) -> None:
 def test_extract_failed_tests_parses_pytest_summary_lines() -> None:
     """extract_failed_tests parses FAILED node ids from output."""
     output = (
-        "=========================== short test summary info ===========================\n"
+        "================ short test summary info ================\n"
         "FAILED tests/test_a.py::test_one - AssertionError\n"
         "FAILED tests/test_b.py::test_two - ValueError\n"
     )
