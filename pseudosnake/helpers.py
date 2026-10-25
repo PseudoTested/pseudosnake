@@ -9,9 +9,13 @@ from typing import Any
 
 from pseudosnake.backup import get_backup_dir
 from pseudosnake.discover import FunctionInfo
+from pseudosnake.dynamic_coverage import FunctionCoverage
 
 
-def build_uncovered_entry(func_info: FunctionInfo) -> dict[str, Any]:
+def build_uncovered_entry(
+    func_info: FunctionInfo,
+    coverage: FunctionCoverage | None = None,
+) -> dict[str, Any]:
     """Build a minimal report entry for a function that was never executed."""
     entry: dict[str, Any] = {
         "function_name": func_info.name,
@@ -23,6 +27,10 @@ def build_uncovered_entry(func_info: FunctionInfo) -> dict[str, Any]:
     # include class name for methods
     if func_info.class_name is not None:
         entry["class_name"] = func_info.class_name
+    # Coverage details are additive so callers without dynamic coverage retain
+    # the older report shape.
+    if coverage is not None:
+        entry["coverage"] = coverage.to_report_dict()
     return entry
 
 
