@@ -1,17 +1,23 @@
 """Mutation strategy — generate and apply function body replacements.
 
-PseudoSnake replaces the **entire body** of a function with a simple
-``return`` statement whose value depends on the function's annotated return
-type.  For example, ``def add(...) -> int: ...``  becomes ``return 0`` and
-``return 1`` — two separate mutants.
+PseudoSnake replaces the **entire body** of one precisely identified function
+with a simple ``return`` statement. The standard AST identifies the function
+and a targeted text edit preserves decorators, signatures, and surrounding
+source.
 """
 
+from __future__ import annotations
+
+from collections.abc import Sequence
+
 from pseudosnake.discover import FunctionInfo
+from pseudosnake.source_edit import (
+    SourceEditError,
+    apply_text_edits,
+    locate_function_nodes,
+    replace_function_body,
+)
 
-
-# mutant catalogue
-# every known return type maps to a list of replacement return statements
-# types without an explicit entry (or "unknown") fall back to ["return None"]
 
 MUTANTS_BY_TYPE: dict[str, list[str]] = {
     "int": ["return 0", "return 1"],
@@ -22,41 +28,42 @@ MUTANTS_BY_TYPE: dict[str, list[str]] = {
     "dict": ["return {}", "return None"],
     "tuple": ["return ()", "return None"],
     "set": ["return set()", "return None"],
-    "none": [],  # function already returns None — no meaningful mutant
+    "none": [],
     "optional": ["return None"],
     "any": ["return None"],
     "unknown": ["return None"],
 }
 
 
-def generate_mutants(return_type: str) -> list[str]:
-    """Return the mutant return statements for *return_type*.
+class MutationApplicationError(ValueError):
+    """Raised when a requested function cannot be mutated exactly once."""
 
-    Falls back to ``["return None"]`` for unrecognised types.
-    """
-    # look up the return type in the catalogue, default to ["return None"]
+
+def generate_mutants(return_type: str) -> list[str]:
+    """Return the mutant return statements for *return_type*."""
+    # unknown annotations use the conservative None-return fallback.
     return MUTANTS_BY_TYPE.get(return_type, ["return None"])
 
 
 def apply_mutant(
-    source_lines: list[str],
+    source_lines: Sequence[str],
     func_info: FunctionInfo,
     mutant: str,
 ) -> list[str]:
-    """Return a new source-line list with the function body replaced.
+    """Return source lines with exactly one function body replaced safely.
 
-    The function signature (``def`` line) is preserved.  Everything from the
-    first body statement through the closing line of the function is replaced
-    with a single indented ``return`` statement.
+    The target is matched using class name, function name, and the original
+    ``def`` line. A mismatch is an invalid mutant rather than permission to
+    alter a similarly named function.
     """
-    # build the replacement line with correct indentation
-    indent = " " * func_info.body_col_offset
-    replacement = indent + mutant + "\n"
-
-    # lines before the first body statement (def + decorators + docstring)
-    before = source_lines[: func_info.body_start_line - 1]
-    # lines after the function's closing line (following functions/trailing code)
-    after = source_lines[func_info.end_line :]
-
-    # splice: keep the signature, replace the body, keep trailing code
-    return before + [replacement] + after
+    source = "".join(source_lines)
+    try:
+        # resolve by class, name, and original def line before constructing a
+        # targeted edit; this prevents same-named functions from being mixed up.
+        node = locate_function_nodes(source, [func_info])[0]
+        edit = replace_function_body(source, node, mutant)
+        mutated = apply_text_edits(source, [edit])
+    except (SyntaxError, SourceEditError) as exc:
+        # the caller reports this as INVALID and does not start the test suite.
+        raise MutationApplicationError(f"Could not apply mutation: {exc}") from exc
+    return mutated.splitlines(keepends=True)
