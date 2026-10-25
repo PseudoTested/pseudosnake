@@ -11,21 +11,15 @@ from pathlib import Path
 class FunctionInfo:
     """Metadata about a discovered Python function extracted from its AST.
 
-    *line_number*     — the ``def`` line.
-    *body_start_line* — first executable statement inside the function body.
-    *end_line*        — last line of the function (closing scope).
-    *body_col_offset* — indentation column of the function body.
-    *return_type*     — normalised lowercase type name (``"unknown"`` when
-                        no annotation is present).
+    *line_number* — the ``def`` line.
+    *return_type* — normalised lowercase type name (``"unknown"`` when no
+                    annotation is present).
     """
 
     name: str
     class_name: str | None
     file_path: Path
     line_number: int
-    body_start_line: int
-    end_line: int
-    body_col_offset: int
     return_type: str
 
 
@@ -84,11 +78,6 @@ def find_test_files(project_dir: Path) -> list[Path]:
         if is_test_file(py_file, project_dir):
             test_files.append(py_file)
     return test_files
-
-
-def find_all_python_files(project_dir: Path) -> list[Path]:
-    """Return every ``.py`` file under *project_dir*, excluding venv/caches."""
-    return [p for p in sorted(project_dir.rglob("*.py")) if not _in_excluded_dir(p)]
 
 
 def find_python_files(
@@ -182,11 +171,26 @@ def _collect_functions(
             # recurse into class bodies, passing the class name as context
             _collect_functions(child, file_path, child.name, results)
         elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            # skip PseudoSnake's own instrumentation functions
-            if _is_internal_name(child.name):
+            # instrumentation helpers are internal, and @overload declarations
+            # are type-checking stubs rather than executable implementations.
+            if _is_internal_name(child.name) or _is_overload(child):
                 continue
             # found a function — extract metadata and add to results
             results.append(_make_function_info(child, file_path, class_name))
+
+
+def _is_overload(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Return whether *node* is a typing ``@overload`` declaration."""
+    for decorator in node.decorator_list:
+        # accept both @overload and the uncommon @overload() spelling.
+        candidate = decorator.func if isinstance(decorator, ast.Call) else decorator
+        # covers ``@overload`` imported directly from typing.
+        if isinstance(candidate, ast.Name) and candidate.id == "overload":
+            return True
+        # Covers qualified forms such as ``@typing.overload``.
+        if isinstance(candidate, ast.Attribute) and candidate.attr == "overload":
+            return True
+    return False
 
 
 def _make_function_info(
@@ -195,16 +199,11 @@ def _make_function_info(
     class_name: str | None,
 ) -> FunctionInfo:
     """Build a ``FunctionInfo`` from an AST function node."""
-    # the first child of a function body is the first executable statement
-    body_node = node.body[0]
     return FunctionInfo(
         name=node.name,
         class_name=class_name,
         file_path=file_path,
         line_number=node.lineno,  # line of the "def" statement
-        body_start_line=body_node.lineno,  # line of first body statement
-        end_line=node.end_lineno or body_node.lineno,
-        body_col_offset=body_node.col_offset,  # indentation of body
         return_type=_extract_return_type(node),
     )
 
