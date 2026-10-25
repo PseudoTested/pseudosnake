@@ -366,22 +366,23 @@ def collect_function_coverage(
         # reading existing coverage files created before line-aware identity.
         legacy_key = key.rsplit("@", 1)[0]
         value = file_data.get(key, file_data.get(legacy_key, 0))
+        # JSON input is untyped, so build a concrete result dictionary only
+        # after validating every key and count. The explicit annotation keeps
+        # static type checkers from carrying Unknown values past this boundary.
+        by_test: dict[str, int] = {}
         if isinstance(value, dict):
             # Keep only valid positive per-test counters. Sorting happens when
             # the record is serialized so output is deterministic.
             raw_by_test = value.get("by_test", {})
-            by_test = (
-                {
-                    test_name: count
-                    for test_name, count in raw_by_test.items()
-                    if isinstance(test_name, str)
-                    and isinstance(count, int)
-                    and not isinstance(count, bool)
-                    and count > 0
-                }
-                if isinstance(raw_by_test, dict)
-                else {}
-            )
+            if isinstance(raw_by_test, dict):
+                for test_name, count in raw_by_test.items():
+                    if (
+                        isinstance(test_name, str)
+                        and isinstance(count, int)
+                        and not isinstance(count, bool)
+                        and count > 0
+                    ):
+                        by_test[test_name] = count
             raw_total = value.get("total", 0)
             total = (
                 raw_total
@@ -400,7 +401,6 @@ def collect_function_coverage(
                 if isinstance(value, int) and not isinstance(value, bool) and value > 0
                 else 0
             )
-            by_test = {}
         coverage[key] = FunctionCoverage(total_calls=total, by_test=by_test)
 
     return coverage
