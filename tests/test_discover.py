@@ -8,7 +8,6 @@ from pathlib import Path
 from pseudosnake.discover import (
     _extract_return_type,
     _resolve_source_root,
-    find_all_python_files,
     find_functions,
     find_python_files,
     find_test_files,
@@ -128,7 +127,7 @@ def test_find_python_files_with_relative_single_file(tmp_path: Path) -> None:
 def test_find_python_files_with_file_argument_returns_single_file(
     tmp_path: Path,
 ) -> None:
-    """find_python_files returns only the specified file when single_file argument is used."""
+    """find_python_files returns only the requested single file."""
     src_dir = tmp_path / "src"
     src_dir.mkdir()
 
@@ -240,6 +239,29 @@ def test_extract_return_type_union() -> None:
     node = tree.body[0]
     assert isinstance(node, ast.FunctionDef)
     assert _extract_return_type(node) == "unknown"
+
+
+def test_find_functions_skips_overload_declarations(tmp_path: Path) -> None:
+    """Only the concrete implementation is returned for overloaded functions."""
+    source = """from typing import overload
+
+@overload
+def convert(value: int) -> str: ...
+
+@overload()
+def convert(value: bytes) -> str: ...
+
+def convert(value: object) -> str:
+    return str(value)
+"""
+    target = tmp_path / "mod.py"
+    target.write_text(source, encoding="utf-8")
+
+    functions = find_functions(target)
+
+    assert [(function.name, function.line_number) for function in functions] == [
+        ("convert", 9)
+    ]
 
 
 def test_extract_return_type_attribute_direct() -> None:
@@ -411,18 +433,3 @@ def decorated_func() -> None:
 
     names = [f.name for f in functions]
     assert "decorated_func" in names
-
-
-def test_find_all_python_files_excludes_venv(tmp_path: Path) -> None:
-    """find_all_python_files returns .py files excluding venv/caches."""
-    (tmp_path / "mod.py").write_text("x")
-    (tmp_path / "tests").mkdir()
-    (tmp_path / "tests" / "test_mod.py").write_text("x")
-    (tmp_path / "not_py.txt").write_text("x")
-    venv = tmp_path / ".venv"
-    venv.mkdir()
-    (venv / "pkg.py").write_text("x")
-
-    result = find_all_python_files(tmp_path)
-    paths = {p.relative_to(tmp_path).as_posix() for p in result}
-    assert paths == {"mod.py", "tests/test_mod.py"}
