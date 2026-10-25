@@ -1,16 +1,19 @@
-"""Tests for pseudosnake — CLI, mutation testing pipeline, helper functions, and entry point."""
+"""Tests for the CLI, mutation pipeline, helpers, and entry point."""
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pseudosnake.discover import FunctionInfo
+from pseudosnake.discover import FunctionInfo, find_functions
+from pseudosnake.dynamic_coverage import FunctionCoverage
 from pseudosnake.helpers import build_metadata, build_uncovered_entry, digest
 from pseudosnake.main import (
     _print_mutant_result,
     _process_file,
+    _resolve_output_path,
     _run_dynamic_coverage_phase,
     _validate_baseline,
     analyze,
@@ -24,6 +27,11 @@ def _silence_console(monkeypatch):
     mock_console = MagicMock()
     monkeypatch.setattr("pseudosnake.main.console", mock_console)
     return mock_console
+
+
+def _ok_run() -> RunResult:
+    """Return a successful single test-command result."""
+    return RunResult(exit_code=0, stdout="", stderr="", duration=0.1)
 
 
 def test_validate_baseline_passes_when_all_runs_succeed(tmp_path: Path) -> None:
@@ -69,27 +77,22 @@ def test_validate_baseline_exits_on_pytest_no_tests(tmp_path: Path) -> None:
             assert e.exit_code == 2
 
 
-def test_run_dynamic_coverage_phase_instruments_files(tmp_path: Path) -> None:
-    """_run_dynamic_coverage_phase instruments source and test files."""
+def test_run_dynamic_coverage_phase_instruments_coverage_files(tmp_path: Path) -> None:
+    """_run_dynamic_coverage_phase instruments files needed for attribution."""
     source_file = tmp_path / "source.py"
     source_file.write_text("def foo(): return 1")
 
     with (
-        patch("pseudosnake.main.find_test_files") as mock_find_tests,
         patch("pseudosnake.main.find_functions") as mock_find_funcs,
         patch("pseudosnake.main.backup_file") as mock_backup,
         patch("pseudosnake.main.restore_file"),
         patch("pseudosnake.main.cleanup_backup"),
-        patch("pseudosnake.main.run_tests_with_env"),
+        patch("pseudosnake.main.run_tests_with_env", return_value=_ok_run()),
         patch("pseudosnake.main.load_dynamic_coverage_results") as mock_load,
-        patch("pseudosnake.main.collect_executed_function_keys") as mock_collect,
     ):
-        mock_find_tests.return_value = []
         mock_find_funcs.return_value = []
         mock_backup.return_value = tmp_path / "backup"
         mock_load.return_value = {}
-        mock_collect.return_value = []
-
         result = _run_dynamic_coverage_phase([source_file], tmp_path, "pytest")
         assert result == {}
 
@@ -144,6 +147,32 @@ def test_digest_empty_string() -> None:
     """digest handles empty string."""
     result = digest("")
     assert len(result) == 64
+
+
+def test_resolve_relative_output_path_from_project() -> None:
+    """Explicit relative reports are written inside the analysed project."""
+    project_dir = Path("/project")
+
+    assert _resolve_output_path(project_dir, Path("output/report.json")) == Path(
+        "/project/output/report.json"
+    )
+
+
+def test_resolve_output_path_preserves_absolute_path() -> None:
+    """An absolute report path remains an explicit destination override."""
+    project_dir = Path("/project")
+    absolute_output = Path("/reports/report.json")
+
+    assert _resolve_output_path(project_dir, absolute_output) == absolute_output
+
+
+def test_resolve_default_output_path_from_project() -> None:
+    """The default report path remains inside the analysed project."""
+    project_dir = Path("/project")
+
+    assert _resolve_output_path(project_dir, None) == Path(
+        "/project/output/output.json"
+    )
 
 
 def test_build_metadata_basic() -> None:
@@ -225,9 +254,6 @@ def test_build_uncovered_entry_top_level() -> None:
         class_name=None,
         file_path=Path("/x.py"),
         line_number=1,
-        body_start_line=2,
-        end_line=5,
-        body_col_offset=0,
         return_type="int",
     )
     entry = build_uncovered_entry(func)
@@ -245,14 +271,31 @@ def test_build_uncovered_entry_with_class() -> None:
         class_name="MyClass",
         file_path=Path("/x.py"),
         line_number=10,
-        body_start_line=11,
-        end_line=15,
-        body_col_offset=4,
         return_type="str",
     )
     entry = build_uncovered_entry(func)
     assert entry["class_name"] == "MyClass"
     assert entry["covered"] is False
+
+
+def test_build_uncovered_entry_includes_zero_coverage() -> None:
+    """Uncovered entries retain their normalized dynamic coverage record."""
+    func = FunctionInfo(
+        name="missing",
+        class_name=None,
+        file_path=Path("mod.py"),
+        line_number=4,
+        return_type="int",
+    )
+
+    entry = build_uncovered_entry(func, FunctionCoverage())
+
+    assert entry["coverage"] == {
+        "total_calls": 0,
+        "attributed_calls": 0,
+        "unattributed_calls": 0,
+        "by_test": {},
+    }
 
 
 def test_main_module_importable() -> None:
@@ -278,7 +321,7 @@ def _fail_agg(code=1):
 
 
 def test_dynamic_coverage_with_real_files(tmp_path, monkeypatch):
-    """_run_dynamic_coverage_phase processes real source and test files."""
+    """Coverage instruments both file types and restores both afterward."""
     import pseudosnake.main as main
 
     src = tmp_path / "mod.py"
@@ -290,14 +333,18 @@ def test_dynamic_coverage_with_real_files(tmp_path, monkeypatch):
     test_text = "def test_f():\n    assert True\n"
     test_file.write_text(test_text)
 
-    monkeypatch.setattr(main, "find_test_files", lambda pd: [test_file])
-    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: None)
+    def assert_instrumentation(*args, **kwargs):
+        assert "__pseudosnake_cov__" in src.read_text()
+        assert "__pseudosnake_test_context__[0]" in test_file.read_text()
+        return _ok_run()
+
+    monkeypatch.setattr(main, "run_tests_with_env", assert_instrumentation)
     monkeypatch.setattr(
         main, "load_dynamic_coverage_results", lambda p: {"mod.py": {"f": 1}}
     )
 
     result = main._run_dynamic_coverage_phase([src], tmp_path, "pytest")
-    assert result == {"mod.py": {"f"}}
+    assert result == {"mod.py": {"f@1": FunctionCoverage(total_calls=1)}}
 
     # Verify files were restored to their original content
     assert src.read_text() == src_text, (
@@ -308,16 +355,41 @@ def test_dynamic_coverage_with_real_files(tmp_path, monkeypatch):
     )
 
 
+def test_dynamic_coverage_failure_aborts_and_restores_source(tmp_path, monkeypatch):
+    """A failing instrumented run aborts instead of reporting zero coverage."""
+    import typer
+
+    import pseudosnake.main as main
+
+    src = tmp_path / "mod.py"
+    original = "def f():\n    return 1\n"
+    src.write_text(original)
+    failed = RunResult(
+        exit_code=1, stdout="collection failed", stderr="bad syntax", duration=0.1
+    )
+    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: failed)
+
+    with pytest.raises(typer.Exit) as exc_info:
+        main._run_dynamic_coverage_phase([src], tmp_path, "pytest")
+
+    assert exc_info.value.exit_code == 2
+    assert src.read_text() == original
+
+
 def test_restore_after_coverage_phase(tmp_path, monkeypatch):
     """Files are restored to original content even when coverage is empty."""
     import pseudosnake.main as main
 
-    original = "def add(a: int, b: int) -> int:\n    return a + b\n\ndef multiply(x: int, y: int) -> int:\n    return x * y\n"
+    original = (
+        "def add(a: int, b: int) -> int:\n"
+        "    return a + b\n\n"
+        "def multiply(x: int, y: int) -> int:\n"
+        "    return x * y\n"
+    )
     src = tmp_path / "math_ops.py"
     src.write_text(original)
 
-    monkeypatch.setattr(main, "find_test_files", lambda pd: [])
-    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: None)
+    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: _ok_run())
     monkeypatch.setattr(main, "load_dynamic_coverage_results", lambda p: {})
 
     result = main._run_dynamic_coverage_phase([src], tmp_path, "pytest")
@@ -332,8 +404,10 @@ def test_restore_after_coverage_phase(tmp_path, monkeypatch):
     )
 
 
-def test_restore_after_coverage_with_test_file(tmp_path, monkeypatch):
-    """Both source and test files are restored after the coverage phase."""
+def test_dynamic_coverage_restores_temporarily_instrumented_tests(
+    tmp_path, monkeypatch
+):
+    """Test markers exist only while the coverage command is running."""
     import pseudosnake.main as main
 
     src = tmp_path / "mod.py"
@@ -346,8 +420,11 @@ def test_restore_after_coverage_with_test_file(tmp_path, monkeypatch):
     test_text = "def test_foo():\n    assert foo() == 42\n"
     test_file.write_text(test_text)
 
-    monkeypatch.setattr(main, "find_test_files", lambda pd: [test_file])
-    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: None)
+    def assert_test_marker(*args, **kwargs):
+        assert "__pseudosnake_test_context__[0]" in test_file.read_text()
+        return _ok_run()
+
+    monkeypatch.setattr(main, "run_tests_with_env", assert_test_marker)
     monkeypatch.setattr(main, "load_dynamic_coverage_results", lambda p: {})
 
     main._run_dynamic_coverage_phase([src], tmp_path, "pytest")
@@ -363,8 +440,7 @@ def test_dynamic_coverage_with_coverage_json(tmp_path, monkeypatch):
     src = tmp_path / "mod.py"
     src.write_text("def f() -> int:\n    return 1\n")
 
-    monkeypatch.setattr(main, "find_test_files", lambda pd: [])
-    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: None)
+    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: _ok_run())
     monkeypatch.setattr(main, "load_dynamic_coverage_results", lambda p: {})
 
     result = main._run_dynamic_coverage_phase([src], tmp_path, "pytest")
@@ -385,9 +461,6 @@ def test_process_file_with_covered_functions(tmp_path, monkeypatch):
         class_name=None,
         file_path=src,
         line_number=1,
-        body_start_line=2,
-        end_line=2,
-        body_col_offset=4,
         return_type="bool",
     )
 
@@ -398,12 +471,18 @@ def test_process_file_with_covered_functions(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "cleanup_backup", lambda bp: None)
 
     entry = main._process_file(
-        src, tmp_path, "pytest", 1, MagicMock(), executed_function_keys={"f"}
+        src,
+        tmp_path,
+        "pytest",
+        1,
+        MagicMock(),
+        function_coverage={"f@1": FunctionCoverage(total_calls=1)},
     )
     assert entry is not None
     funcs = entry["functions"]
     assert len(funcs) == 1
     assert funcs[0]["covered"] is True
+    assert funcs[0]["coverage"]["total_calls"] == 1
     assert len(funcs[0]["mutants"]) == 2
 
 
@@ -421,9 +500,6 @@ def test_process_file_skips_uncovered(tmp_path, monkeypatch):
         class_name=None,
         file_path=src,
         line_number=1,
-        body_start_line=2,
-        end_line=2,
-        body_col_offset=4,
         return_type="int",
     )
     g_info = FunctionInfo(
@@ -431,9 +507,6 @@ def test_process_file_skips_uncovered(tmp_path, monkeypatch):
         class_name=None,
         file_path=src,
         line_number=3,
-        body_start_line=4,
-        end_line=4,
-        body_col_offset=4,
         return_type="str",
     )
 
@@ -444,15 +517,28 @@ def test_process_file_skips_uncovered(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "cleanup_backup", lambda bp: None)
 
     entry = main._process_file(
-        src, tmp_path, "pytest", 1, MagicMock(), executed_function_keys={"f"}
+        src,
+        tmp_path,
+        "pytest",
+        1,
+        MagicMock(),
+        function_coverage={
+            "f@1": FunctionCoverage(
+                total_calls=2,
+                by_test={"tests/test_mod.py::test_f": 2},
+            ),
+            "g@3": FunctionCoverage(),
+        },
     )
     assert entry is not None
     funcs = entry["functions"]
     covered = next(f for f in funcs if f["function_name"] == "f")
     uncovered = next(f for f in funcs if f["function_name"] == "g")
     assert covered["covered"] is True
+    assert covered["coverage"]["by_test"] == {"tests/test_mod.py::test_f": 2}
     assert len(covered["mutants"]) == 2
     assert uncovered["covered"] is False
+    assert uncovered["coverage"]["total_calls"] == 0
     assert uncovered["mutants"] == []
 
 
@@ -470,9 +556,6 @@ def test_process_function_runs_mutants(tmp_path, monkeypatch):
         class_name=None,
         file_path=src,
         line_number=1,
-        body_start_line=2,
-        end_line=2,
-        body_col_offset=4,
         return_type="int",
     )
 
@@ -502,9 +585,6 @@ def test_run_single_mutant_killed(tmp_path, monkeypatch):
         class_name=None,
         file_path=src,
         line_number=1,
-        body_start_line=2,
-        end_line=2,
-        body_col_offset=4,
         return_type="int",
     )
 
@@ -534,9 +614,6 @@ def test_run_single_mutant_survived(tmp_path, monkeypatch):
         class_name=None,
         file_path=src,
         line_number=1,
-        body_start_line=2,
-        end_line=2,
-        body_col_offset=4,
         return_type="int",
     )
 
@@ -547,6 +624,61 @@ def test_run_single_mutant_survived(tmp_path, monkeypatch):
     )
     assert status == "SURVIVED"
     assert result.exit_code == 0
+
+
+def test_run_single_mutant_rejects_invalid_python_without_running_tests(
+    tmp_path, monkeypatch
+):
+    """An invalid generated mutation is reported without invoking pytest."""
+    import pseudosnake.main as main
+
+    src = tmp_path / "mod.py"
+    original = "def values():\n    return 1\n"
+    src.write_text(original)
+    backup = tmp_path / "backup"
+    backup.write_text(original)
+    func = find_functions(src)[0]
+
+    def should_not_run(*args, **kwargs):
+        raise AssertionError("tests must not run for invalid Python")
+
+    monkeypatch.setattr(main, "run_tests_repeated", should_not_run)
+
+    result, status, verification, codes = main._run_single_mutant(
+        src, func, "return await", "pytest", 1, tmp_path, backup
+    )
+
+    assert status == "INVALID"
+    assert result.exit_code == -2
+    assert "Invalid mutation" in result.stderr
+    assert verification["mutation_applied"] is False
+    assert verification["mutation_restored"] is True
+    assert codes == []
+    assert src.read_text() == original
+
+
+def test_run_single_mutant_reports_collection_failure_as_error(tmp_path, monkeypatch):
+    """A pytest collection or usage failure cannot count as a killed mutant."""
+    import pseudosnake.main as main
+
+    src = tmp_path / "mod.py"
+    original = "def f() -> int:\n    return 42\n"
+    src.write_text(original)
+    backup = tmp_path / "backup"
+    backup.write_text(original)
+    func = find_functions(src)[0]
+    monkeypatch.setattr(main, "run_tests_repeated", lambda *a, **kw: _fail_agg(4))
+
+    result, status, verification, codes = main._run_single_mutant(
+        src, func, "return 0", "pytest", 1, tmp_path, backup
+    )
+
+    assert status == "ERROR"
+    assert result.exit_code == 4
+    assert verification["mutation_applied"] is True
+    assert verification["mutation_restored"] is True
+    assert codes == [4]
+    assert src.read_text() == original
 
 
 # --- coverage gap: baseline with mixed exit codes (110->109, 109->116) ---
@@ -571,27 +703,6 @@ def test_validate_baseline_prints_stderr_with_mixed_runs(tmp_path: Path) -> None
             pass
 
 
-# --- coverage gap: already-instrumented guards ---
-
-
-def test_dynamic_coverage_skips_instrumented_test_file(tmp_path, monkeypatch):
-    """Test files already containing the marker are skipped."""
-    import pseudosnake.main as main
-    from pseudosnake.dynamic_coverage import _INSTRUMENTATION_MARKER as MARKER
-
-    test_file = tmp_path / "test_x.py"
-    test_file.write_text(MARKER + "\ndef test_x(): pass\n")
-    src = tmp_path / "mod.py"
-    src.write_text("def f(): pass\n")
-
-    monkeypatch.setattr(main, "find_test_files", lambda pd: [test_file])
-    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: None)
-    monkeypatch.setattr(main, "load_dynamic_coverage_results", lambda p: {})
-
-    result = main._run_dynamic_coverage_phase([src], tmp_path, "pytest")
-    assert result == {}
-
-
 def test_dynamic_coverage_skips_instrumented_source_file(tmp_path, monkeypatch):
     """Source files already containing the marker are skipped."""
     import pseudosnake.main as main
@@ -600,52 +711,14 @@ def test_dynamic_coverage_skips_instrumented_source_file(tmp_path, monkeypatch):
     src = tmp_path / "mod.py"
     src.write_text(MARKER + "\ndef f(): pass\n")
 
-    monkeypatch.setattr(main, "find_test_files", lambda pd: [])
-    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: None)
+    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: _ok_run())
     monkeypatch.setattr(main, "load_dynamic_coverage_results", lambda p: {})
 
     result = main._run_dynamic_coverage_phase([src], tmp_path, "pytest")
     assert result == {}
 
 
-# --- coverage gap: test file with no functions (line 161) ---
-
-
-def test_dynamic_coverage_skips_empty_test_file(tmp_path, monkeypatch):
-    """Test files with no test functions are skipped."""
-    import pseudosnake.main as main
-
-    test_file = tmp_path / "test_x.py"
-    test_file.write_text("x = 1\n")
-    src = tmp_path / "mod.py"
-    src.write_text("def f():\n    pass\n")
-
-    monkeypatch.setattr(main, "find_test_files", lambda pd: [test_file])
-    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: None)
-    monkeypatch.setattr(main, "load_dynamic_coverage_results", lambda p: {})
-
-    main._run_dynamic_coverage_phase([src], tmp_path, "pytest")
-
-
-# --- coverage gap: source/test overlap (line 176) ---
-
-
-def test_dynamic_coverage_skips_source_already_test(tmp_path, monkeypatch):
-    """Source file already instrumented as a test file is skipped."""
-    import pseudosnake.main as main
-
-    mod = tmp_path / "mod.py"
-    mod.write_text("def f():\n    pass\n")
-
-    monkeypatch.setattr(main, "find_test_files", lambda pd: [mod])
-    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: None)
-    monkeypatch.setattr(main, "load_dynamic_coverage_results", lambda p: {})
-
-    result = main._run_dynamic_coverage_phase([mod], tmp_path, "pytest")
-    assert result == {}
-
-
-# --- coverage gap: coverage JSON exists + executed empty + functions present (212-213, 240-241) ---
+# --- coverage gap: coverage JSON exists, executed empty, functions present ---
 
 
 def test_dynamic_coverage_executed_map_empty(tmp_path, monkeypatch):
@@ -655,14 +728,13 @@ def test_dynamic_coverage_executed_map_empty(tmp_path, monkeypatch):
     src = tmp_path / "mod.py"
     src.write_text("def f():\n    pass\n")
 
-    monkeypatch.setattr(main, "find_test_files", lambda pd: [])
-    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: None)
+    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: _ok_run())
     monkeypatch.setattr(
         main, "load_dynamic_coverage_results", lambda p: {"mod.py": {"g": 0}}
     )
 
     result = main._run_dynamic_coverage_phase([src], tmp_path, "pytest")
-    assert result == {"mod.py": set()}
+    assert result == {"mod.py": {"f@1": FunctionCoverage()}}
 
     # Verify restore still happened
     assert src.read_text() == "def f():\n    pass\n"
@@ -672,21 +744,24 @@ def test_dynamic_coverage_executed_map_empty(tmp_path, monkeypatch):
 
 
 def test_dynamic_coverage_restore_failure_warning(tmp_path, monkeypatch):
-    """When restore fails, a warning is printed and cleanup still runs."""
+    """A restore failure aborts before mutation testing can begin."""
+    import typer
+
     import pseudosnake.main as main
 
     src = tmp_path / "mod.py"
     src.write_text("def f():\n    pass\n")
 
-    monkeypatch.setattr(main, "find_test_files", lambda pd: [])
-    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: None)
+    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: _ok_run())
     monkeypatch.setattr(main, "load_dynamic_coverage_results", lambda p: {})
     monkeypatch.setattr(
         main, "restore_file", lambda fp, bp: (_ for _ in ()).throw(Exception("boom"))
     )
 
-    result = main._run_dynamic_coverage_phase([src], tmp_path, "pytest")
-    assert result == {}
+    with pytest.raises(typer.Exit) as exc_info:
+        main._run_dynamic_coverage_phase([src], tmp_path, "pytest")
+
+    assert exc_info.value.exit_code == 2
 
 
 def test_dynamic_coverage_cleanup_failure_silent(tmp_path, monkeypatch):
@@ -696,8 +771,7 @@ def test_dynamic_coverage_cleanup_failure_silent(tmp_path, monkeypatch):
     src = tmp_path / "mod.py"
     src.write_text("def f():\n    pass\n")
 
-    monkeypatch.setattr(main, "find_test_files", lambda pd: [])
-    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: None)
+    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: _ok_run())
     monkeypatch.setattr(main, "load_dynamic_coverage_results", lambda p: {})
     monkeypatch.setattr(
         main, "cleanup_backup", lambda bp: (_ for _ in ()).throw(Exception("boom"))
@@ -707,11 +781,11 @@ def test_dynamic_coverage_cleanup_failure_silent(tmp_path, monkeypatch):
     assert result == {}
 
 
-# --- coverage gap: _process_file with executed_function_keys=None (308->311) ---
+# --- coverage gap: _process_file with function_coverage=None ---
 
 
 def test_process_file_without_coverage_keys(tmp_path, monkeypatch):
-    """_process_file mutation-tests all functions when executed_function_keys is None."""
+    """Mutation-test all functions when no coverage keys are provided."""
     import pseudosnake.main as main
 
     src = tmp_path / "mod.py"
@@ -724,9 +798,6 @@ def test_process_file_without_coverage_keys(tmp_path, monkeypatch):
         class_name=None,
         file_path=src,
         line_number=1,
-        body_start_line=2,
-        end_line=2,
-        body_col_offset=4,
         return_type="int",
     )
 
@@ -736,7 +807,7 @@ def test_process_file_without_coverage_keys(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "restore_file", lambda fp, bp: None)
     monkeypatch.setattr(main, "cleanup_backup", lambda bp: None)
 
-    # executed_function_keys=None — should still mutation-test all functions
+    # function_coverage=None — should still mutation-test all functions
     entry = main._process_file(src, tmp_path, "pytest", 1, MagicMock())
     assert entry is not None
     assert len(entry["functions"]) == 1
@@ -763,9 +834,9 @@ def test_dynamic_coverage_json_exists(tmp_path, monkeypatch):
     def write_coverage_json(*a, **kw):
         cov_path = kw.get("extra_env", {}).get("PSEUDOSNAKE_DYN_COV_PATH", "")
         Path(cov_path).write_text('{"mod.py": {"f": 1}}')
+        return _ok_run()
 
     monkeypatch.setattr(main, "run_tests_with_env", write_coverage_json)
-    monkeypatch.setattr(main, "find_test_files", lambda pd: [])
     monkeypatch.setattr(main, "load_dynamic_coverage_results", lambda p: {})
 
     main._run_dynamic_coverage_phase([src], tmp_path, "pytest")
@@ -775,14 +846,15 @@ def test_dynamic_coverage_json_exists(tmp_path, monkeypatch):
 
 
 def test_dynamic_coverage_restore_verification_fails(tmp_path, monkeypatch):
-    """When restored content differs from backup, a red error is printed."""
+    """A mismatched restored file aborts the coverage phase."""
+    import typer
+
     import pseudosnake.main as main
 
     src = tmp_path / "mod.py"
     src.write_text("def f():\n    pass\n")
 
-    monkeypatch.setattr(main, "find_test_files", lambda pd: [])
-    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: None)
+    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: _ok_run())
     monkeypatch.setattr(main, "load_dynamic_coverage_results", lambda p: {})
 
     # mock restore_file to leave the file in its instrumented state,
@@ -792,7 +864,10 @@ def test_dynamic_coverage_restore_verification_fails(tmp_path, monkeypatch):
 
     monkeypatch.setattr(main, "restore_file", noop_restore)
 
-    main._run_dynamic_coverage_phase([src], tmp_path, "pytest")
+    with pytest.raises(typer.Exit) as exc_info:
+        main._run_dynamic_coverage_phase([src], tmp_path, "pytest")
+
+    assert exc_info.value.exit_code == 2
 
 
 # --- coverage gap: multiple source files (240->227) ---
@@ -807,8 +882,7 @@ def test_dynamic_coverage_multiple_source_files(tmp_path, monkeypatch):
     src2 = tmp_path / "mod2.py"
     src2.write_text("x = 1\n")  # no functions — exercises elif branch fall-through
 
-    monkeypatch.setattr(main, "find_test_files", lambda pd: [])
-    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: None)
+    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: _ok_run())
     monkeypatch.setattr(
         main,
         "load_dynamic_coverage_results",
@@ -816,7 +890,10 @@ def test_dynamic_coverage_multiple_source_files(tmp_path, monkeypatch):
     )
 
     result = main._run_dynamic_coverage_phase([src1, src2], tmp_path, "pytest")
-    assert result == {"mod1.py": {"f"}, "mod2.py": set()}
+    assert result == {
+        "mod1.py": {"f@1": FunctionCoverage(total_calls=1)},
+        "mod2.py": {},
+    }
 
 
 # --- coverage gap: analyze CLI command (510-586) ---
@@ -835,7 +912,8 @@ def test_analyze_command_integration(tmp_path, monkeypatch):
     test_dir = tmp_path / "tests"
     test_dir.mkdir()
     test_file = test_dir / "test_mod.py"
-    test_file.write_text("def test_f():\n    assert True\n")
+    original_test = "def test_f():\n    assert True\n"
+    test_file.write_text(original_test)
 
     snap_dir = tmp_path / ".pseudosnake_snap"
     monkeypatch.setattr(main, "find_test_files", lambda pd: [test_file])
@@ -846,12 +924,31 @@ def test_analyze_command_integration(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(main, "restore_snapshot", lambda sd, pd: 0)
     monkeypatch.setattr(main, "cleanup_snapshot", lambda sd: None)
-    monkeypatch.setattr(main, "run_tests_repeated", lambda *a, **kw: _ok_agg())
-    monkeypatch.setattr(main, "run_tests_with_env", lambda *a, **kw: None)
+
+    def run_unmodified_tests(*args, **kwargs):
+        # Baseline and mutation runs must always see the original test file.
+        assert test_file.read_text() == original_test
+        return _ok_agg()
+
+    def run_coverage_tests(*args, **kwargs):
+        # Test markers exist only for the one dynamic-coverage run.
+        assert "__pseudosnake_test_context__[0]" in test_file.read_text()
+        return _ok_run()
+
+    monkeypatch.setattr(main, "run_tests_repeated", run_unmodified_tests)
+    monkeypatch.setattr(main, "run_tests_with_env", run_coverage_tests)
     monkeypatch.setattr(
         main,
         "load_dynamic_coverage_results",
-        lambda p: {"mod.py": {"f": 1}, "extra.py": {"g": 1}},
+        lambda p: {
+            "mod.py": {
+                "f": {
+                    "total": 2,
+                    "by_test": {"tests/test_mod.py::test_f": 2},
+                }
+            },
+            "extra.py": {"g": 1},
+        },
     )
 
     analyze(
@@ -866,7 +963,16 @@ def test_analyze_command_integration(tmp_path, monkeypatch):
 
     # After the run, source and test files must be restored to their original state
     assert src.read_text() == "def f() -> int:\n    return 1\n"
-    assert test_file.read_text() == "def test_f():\n    assert True\n"
+    assert test_file.read_text() == original_test
 
     # Report should be written
     assert (tmp_path / "report.json").exists()
+    report = json.loads((tmp_path / "report.json").read_text())
+    functions = {
+        function["function_name"]: function
+        for file_entry in report["files"]
+        for function in file_entry["functions"]
+    }
+    assert functions["f"]["coverage"]["by_test"] == {"tests/test_mod.py::test_f": 2}
+    # Legacy totals are retained but cannot identify an individual test.
+    assert functions["g"]["coverage"]["unattributed_calls"] == 1
