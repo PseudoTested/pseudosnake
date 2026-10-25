@@ -1,1 +1,4 @@
-"""PseudoSnake: A tool to identify pseudo-tested statements and methods in Python packages."""
+"""PseudoSnake identifies pseudo-tested statements and methods.
+
+It supports mutation analysis of Python packages.
+"""
