@@ -10,9 +10,6 @@ readme = "README.md"
 dependencies = [
     "typer>=0.20.0,<0.21",
     "rich>=13.8.1,<14",
-    "requests>=2.32.0,<3",
-    "libcst>=1.5.0,<2",
-    "coverage>=7.6.0,<8",
     "platformdirs>=4.0.0,<5",
 ]
 
@@ -34,7 +31,6 @@ dev = [
     "isort>=5.10.1,<6",
     "symbex>=1.4,<2",
     "mypy>=1.11.2,<2",
-    "types-requests>=2.32.0,<3",
     "ruff>=0.9.3,<0.10",
     "ty>=0.0.8",
     "pyrefly>=0.46.2",
@@ -56,9 +52,6 @@ project = "pseudosnake"
 tests = "tests"
 ruff-check-command = { var = "ruff check {project} {tests}", recursive = true }
 coverage-test-command = "pytest --cov=pseudosnake --cov-branch --cov-fail-under=80 --cov-report=term-missing tests/"
-coverage-test-command-silent = "pytest -x --show-capture=no --cov-report term-missing --cov-report json --cov --cov-branch"
-developer-test-command = "pytest -x -s"
-developer-test-silent-command = "pytest -x --show-capture=no"
 ruff-fixformat-command = { var = "ruff format {project} {tests}", recursive = true }
 ruff-format-command = { var = "ruff format --check {project} {tests}", recursive = true }
 symbex-typed-command = {var = "symbex -s --untyped -d {project} --check", recursive = true}
@@ -109,6 +102,18 @@ line_length = 88
 
 [tool.mypy]
 ignore_missing_imports = true
+
+[tool.pyright]
+# Use the same project environment as VS Code and the other development tools.
+venvPath = "."
+venv = ".venv"
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+# Ruff's formatter cannot wrap every comment or string, so lint those as E501.
+extend-select = ["E501"]
 
 [tool.coverage.run]
 source = ["pseudosnake"]
