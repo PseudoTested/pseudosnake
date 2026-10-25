@@ -5,6 +5,7 @@ from pathlib import Path
 
 
 from pseudosnake.discover import FunctionInfo
+from pseudosnake.dynamic_coverage import FunctionCoverage
 from pseudosnake.report import (
     build_file_entry,
     build_function_entry,
@@ -77,9 +78,6 @@ def test_build_function_entry_with_class() -> None:
         class_name="MyClass",
         file_path=Path("mod.py"),
         line_number=10,
-        body_start_line=11,
-        end_line=15,
-        body_col_offset=4,
         return_type="str",
     )
     entry = build_function_entry(func_info, [])
@@ -95,9 +93,6 @@ def test_build_function_entry_without_class() -> None:
         class_name=None,
         file_path=Path("mod.py"),
         line_number=1,
-        body_start_line=2,
-        end_line=4,
-        body_col_offset=0,
         return_type="int",
     )
     entry = build_function_entry(func_info, [])
@@ -111,15 +106,51 @@ def test_build_function_entry_uncovered() -> None:
         class_name=None,
         file_path=Path("mod.py"),
         line_number=5,
-        body_start_line=6,
-        end_line=8,
-        body_col_offset=0,
         return_type="str",
     )
     entry = build_function_entry(func_info, [], covered=False)
     assert entry["covered"] is False
     assert entry["mutants"] == []
     assert entry["function_name"] == "uncalled"
+
+
+def test_build_function_entry_includes_coverage_attribution() -> None:
+    """Function entries expose total, attributed, and per-test calls."""
+    func_info = FunctionInfo(
+        name="work",
+        class_name=None,
+        file_path=Path("mod.py"),
+        line_number=8,
+        return_type="int",
+    )
+    coverage = FunctionCoverage(
+        total_calls=4,
+        by_test={"tests/test_mod.py::test_work": 3},
+    )
+
+    entry = build_function_entry(func_info, [], coverage=coverage)
+
+    assert entry["coverage"] == {
+        "total_calls": 4,
+        "attributed_calls": 3,
+        "unattributed_calls": 1,
+        "by_test": {"tests/test_mod.py::test_work": 3},
+    }
+
+
+def test_build_function_entry_uses_coverage_as_source_of_truth() -> None:
+    """A zero-call record cannot disagree with the covered summary boolean."""
+    func_info = FunctionInfo(
+        name="missing",
+        class_name=None,
+        file_path=Path("mod.py"),
+        line_number=12,
+        return_type="int",
+    )
+
+    entry = build_function_entry(func_info, [], coverage=FunctionCoverage())
+
+    assert entry["covered"] is False
 
 
 def test_build_file_entry() -> None:
@@ -181,6 +212,20 @@ def test_build_mutant_entry_crash_status() -> None:
     assert entry["pseudo_tested"] is False
 
 
+def test_build_mutant_entry_includes_non_testable_diagnostic() -> None:
+    """Infrastructure and invalid results retain their useful error output."""
+    result = RunResult(
+        exit_code=4,
+        stdout="",
+        stderr="pytest: usage error",
+        duration=0.1,
+    )
+
+    entry = build_mutant_entry("return 0", result, "ERROR")
+
+    assert entry["error"] == "pytest: usage error"
+
+
 def test_compute_mutation_score_empty() -> None:
     """compute_mutation_score returns zeroes when there are no entries."""
     score = compute_mutation_score([])
@@ -190,6 +235,8 @@ def test_compute_mutation_score_empty() -> None:
     assert score["SURVIVED"] == 0
     assert score["NO_TESTS"] == 0
     assert score["CRASH"] == 0
+    assert score["ERROR"] == 0
+    assert score["INVALID"] == 0
     assert score["mutation_score"] == 0.0
 
 
@@ -201,13 +248,15 @@ def test_compute_mutation_score_mixed() -> None:
     )
     no_tests = build_mutant_entry("return 1", _make_run_result(exit_code=5), "NO_TESTS")
     crash = build_mutant_entry("return 'x'", _make_run_result(exit_code=-1), "CRASH")
+    error = build_mutant_entry("return {}", _make_run_result(exit_code=4), "ERROR")
+    invalid = build_mutant_entry("return []", _make_run_result(exit_code=-2), "INVALID")
 
     file_entries = [
         {
             "file": "a.py",
             "functions": [
                 {"mutants": [killed, survived]},
-                {"mutants": [no_tests, crash]},
+                {"mutants": [no_tests, crash, error, invalid]},
             ],
         },
         {
@@ -218,12 +267,14 @@ def test_compute_mutation_score_mixed() -> None:
         },
     ]
     score = compute_mutation_score(file_entries)
-    assert score["total_mutants"] == 5
+    assert score["total_mutants"] == 7
     assert score["testable_mutants"] == 3  # 2 killed + 1 survived
     assert score["KILLED"] == 2
     assert score["SURVIVED"] == 1
     assert score["NO_TESTS"] == 1
     assert score["CRASH"] == 1
+    assert score["ERROR"] == 1
+    assert score["INVALID"] == 1
     assert score["mutation_score"] == round(2 / 3 * 100, 2)
 
 
